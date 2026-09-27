@@ -4,11 +4,17 @@
 
 [![版本](https://img.shields.io/badge/version-v1.0.0-4a7fa5)](https://github.com/qimingjiu/twig-mnemosyne/releases) [![测试](https://img.shields.io/badge/tests-154%2F154-c9a227)](docs/testing.md) [![License: MIT](https://img.shields.io/badge/license-MIT-8a9a5b)](LICENSE)
 
-Mnemosyne 是一个单用户、自托管的 AI 陪伴运行时：Telegram bot、Web Dashboard、任意支持
-MCP 的 AI 客户端都通过同一套身份凭证接入，由它统一完成身份认证、上下文装配、隐私分层、
+Mnemosyne 是一个单用户、自托管的 AI 陪伴运行时：Telegram bot、Web Dashboard，以及支持
+自定义 OpenAI 兼容 API 的聊天客户端，通过同一用户身份下的客户端凭证接入，
+由它统一完成身份认证、上下文装配、隐私分层、
 危机干预与主动触达（Huginn）；长期记忆与叙事由上游
 [twig-memory](https://github.com/qimingjiu/twig-memory)（muninn）持久化，模型调用经
 LiteLLM 网关路由到任意厂商。所有数据落在自己的 Postgres 与数据卷里。
+
+**想接上客户端，或让 AI 带你部署、排查？** 先看
+[客户端接入与 AI 操作指南](docs/CLIENT-AND-AI-GUIDE.md)：包含 Base URL / API Key 填法、
+Web / Telegram 接线、自动记忆与工具流程，以及加密、本地模型和后续记忆使用的实际边界。
+客户端聊天入口是 OpenAI 兼容 API；服务端的 MCP 工具网关承担另一层职责。
 
 | 能力 | 说明 | 代码 |
 |---|---|---|
@@ -25,12 +31,16 @@ LiteLLM 网关路由到任意厂商。所有数据落在自己的 Postgres 与�
 ```
  Telegram bot ──┐                    ┌──→ twig-memory   长期记忆/叙事引擎（上游仓库）
  Web Dashboard ─┼─→ mnemosyne ──────┼──→ litellm       模型网关 → 各厂商 API
- MCP/AI 客户端 ─┘     runtime        ├──→ mcp-gateway   MCP 工具懒连接聚合
+ AI 聊天客户端 ─┘     runtime        ├──→ mcp-gateway   MCP 工具懒连接聚合
                  （本仓库主体：      └──→ postgres(pgvector) / redis
                    身份·隐私·危机·触达·装配）
 ```
 
-浏览器只对 runtime 说话（`/v1/web/*` BFF），凭证不出服务端；运行时配置在 `config/`。
+浏览器通过 runtime 的 `/v1/web/*` BFF 与 `/v1/chat/completions` 访问服务，只持有自己的
+`client_key`；上游模型、Twig 与管理面凭证留在服务端。运行时配置在 `config/`。
+
+本地隐私路由目前约束主回答链；全流程隔离的已知边界见
+[指南第 6 节](docs/CLIENT-AND-AI-GUIDE.md#6-隐私加密和本地模型的实际边界)。
 
 ## 快速开始
 
@@ -87,6 +97,7 @@ node_modules；目录在 `.gitignore` 中，不入库）。上游更新后重新
 
 | 文档 | 内容 |
 |---|---|
+| [docs/CLIENT-AND-AI-GUIDE.md](docs/CLIENT-AND-AI-GUIDE.md) | 客户端接入、AI 操作、自动记忆流程、隐私边界与常见问题 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本编年史（v1.0.0 起） |
 | [docs/Mnemosyne_Technical_Implementation_Document_v0.3.0_complete.md](docs/Mnemosyne_Technical_Implementation_Document_v0.3.0_complete.md) | 总设计文档（各处 § 引用的出处） |
 | [docs/Mnemosyne_Technical_Implementation_Document_v0.3.1_patch.md](docs/Mnemosyne_Technical_Implementation_Document_v0.3.1_patch.md) | v0.3.1 增量补丁 |
