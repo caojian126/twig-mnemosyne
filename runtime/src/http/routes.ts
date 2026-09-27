@@ -5,7 +5,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { env, sha256Short } from '../config.js'
-import { IdentityError, AttemptLimiter, resolveSession, registerClient, rotateClientKey, authClient, getUserById, type ClientRow, type UserRow } from '../identity/service.js'
+import { IdentityError, AttemptLimiter, resolveSession, registerClient, rotateClientKey, type ClientRow, type UserRow } from '../identity/service.js'
 import { handleChatCompletion, type ChatDeps, type ChatOutcome } from '../chat/pipeline.js'
 import { renderMetrics } from '../observability/metrics.js'
 import { registerBrokerRoute } from '../broker/tokenBroker.js'
@@ -14,6 +14,7 @@ import { loadCapabilities, getForLane } from '../router/capabilities.js'
 import { MODEL_REGISTRY } from '../context/modelRegistry.js'
 import { extractClientKey, rateLimit } from './shared.js'
 import { timingSafeEq } from '../util/crypto.js'
+import { outboundToTelegram } from '../telegram/adapter.js'
 import { registerWebRoutes } from './webRoutes.js'
 
 export interface RouteDeps extends ChatDeps {
@@ -104,7 +105,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return out
   })
 
-  app.get('/metrics', async () => await renderMetrics())
+  // /metrics：默认公开（内网 Prometheus 抓取），配 METRICS_TOKEN 后要求 Bearer——
+  // 公网暴露面的另一半收敛在 Caddy（deploy/compose/Caddyfile 对 /metrics 直接 403）
+  app.get('/metrics', async (req, reply) => {
+    if (env.METRICS_TOKEN.length > 0) {
+      const auth = req.headers['authorization']
+      if (typeof auth !== 'string' || auth !== `Bearer ${env.METRICS_TOKEN}`) {
+        return reply.code(403).send({ error: 'forbidden' })
+      }
+    }
+    reply.header('Cache-Control', 'no-store')
+    return renderMetrics()
+  })
 
   // —— identity ——
   app.post('/v1/identity/register', async (req, reply) => {
@@ -294,10 +306,23 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (env.BROKER_INTERNAL_TOKEN.length === 0 || typeof t !== 'string' || !timingSafeEq(t, env.BROKER_INTERNAL_TOKEN)) {
       return reply.code(403).send({ error: 'forbidden' })
     }
-    const body = (req.body ?? {}) as { content?: string; chat_id?: number }
+    const body = (req.body ?? {}) as { content?: string; chat_id?: number; dedupe_key?: string }
     if (!body.content) return reply.code(400).send({ error: 'content required' })
-    const { outboundToTelegram } = await import('../telegram/adapter.js')
-    const result = await outboundToTelegram({ db: deps.db, botToken: env.TELEGRAM_BOT_TOKEN }, body.content, body.chat_id)
+    // 触达回应闭环：带 dedupe_key 时反查 claim_id，TG 侧按 message_id 落映射（用户回复 → user_engaged）
+    let claimId: string | undefined
+    if (body.dedupe_key) {
+      const { rows } = await deps.db.query<{ claim_id: string | null }>(
+        'SELECT claim_id FROM outreach WHERE dedupe_key = $1 AND claim_id IS NOT NULL LIMIT 1',
+        [body.dedupe_key],
+      )
+      claimId = rows[0]?.claim_id ?? undefined
+    }
+    const result = await outboundToTelegram(
+      { db: deps.db, botToken: env.TELEGRAM_BOT_TOKEN, redis: deps.redis },
+      body.content,
+      body.chat_id,
+      claimId ? { claimId, content: body.content } : undefined,
+    )
     return result
   })
 
@@ -403,6 +428,3 @@ function renderStreamCompletion(reply: FastifyReply, payload: Record<string, unk
   reply.raw.end('data: [DONE]\n\n')
 }
 
-// authClient / getUserById 由 index.ts 组装为 identityAuth / userOf 注入
-void authClient
-void getUserById

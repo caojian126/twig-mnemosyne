@@ -16,6 +16,7 @@ import { env } from '../config.js'
 import { getUserById, type ClientRow, type UserRow } from '../identity/service.js'
 import { handleChatCompletion, type Attachment, type ChatDeps } from '../chat/pipeline.js'
 import { isCrisis, DEFAULT_CRISIS_RESOURCES } from '../crisis/lexicon.js'
+import { errorsTotal } from '../observability/metrics.js'
 
 const API = (token: string, method: string): string => `https://api.telegram.org/bot${token}/${method}`
 const TG_CHUNK = 3800
@@ -26,6 +27,8 @@ interface TgUpdate {
     text?: string
     chat: { id: number; type: string }
     from?: { id: number; is_bot: boolean; first_name?: string }
+    /** 用户「回复」某条消息：触达回应闭环按它关联 outreach（无此字段则不做关联判定） */
+    reply_to_message?: { message_id: number }
   }
 }
 
@@ -36,12 +39,20 @@ async function tgCall<T>(token: string, method: string, body?: Record<string, un
     body: JSON.stringify(body ?? {}),
     signal: AbortSignal.timeout(timeoutMs),
   })
-  const data = (await res.json()) as { ok: boolean; result: T; description?: string }
+  const data = (await res.json()) as { ok: boolean; result: T; description?: string; parameters?: { retry_after?: number } }
+  // 429 flood control：按 retry_after 退避重试一次（此前失败即抛——chat 回复丢一次就是丢了）
+  if (res.status === 429 && !data.ok) {
+    const wait = Math.min(data.parameters?.retry_after ?? 2, 30) * 1000
+    console.warn(`[telegram] ${method} 429, retrying after ${wait / 1000}s`)
+    await new Promise(r => setTimeout(r, wait))
+    return tgCall(token, method, body, timeoutMs)
+  }
   if (!data.ok) throw new Error(`telegram ${method}: ${data.description ?? res.status}`)
   return data.result
 }
 
-export async function sendTelegram(token: string, chatId: number, text: string): Promise<void> {
+/** 分段发送，返回各段 message_id（触达回应映射要按它落键）。 */
+export async function sendTelegram(token: string, chatId: number, text: string): Promise<number[]> {
   // TG 上限 4096；按段落优先切块
   const chunks: string[] = []
   let rest = text
@@ -52,9 +63,12 @@ export async function sendTelegram(token: string, chatId: number, text: string):
     rest = rest.slice(cut)
   }
   chunks.push(rest)
+  const ids: number[] = []
   for (const c of chunks) {
-    await tgCall(token, 'sendMessage', { chat_id: chatId, text: c, disable_web_page_preview: true })
+    const sent = await tgCall<{ message_id: number }>(token, 'sendMessage', { chat_id: chatId, text: c, disable_web_page_preview: true })
+    ids.push(sent.message_id)
   }
+  return ids
 }
 
 /**
@@ -89,7 +103,7 @@ export async function sendTtsAudio(token: string, chatId: number, buf: Buffer, m
   if (!data.ok) throw new Error(`telegram sendAudio(tts): ${data.description ?? res.status}`)
 }
 
-interface TgDeps extends ChatDeps {
+export interface TgDeps extends ChatDeps {
   botToken: string
 }
 
@@ -109,21 +123,22 @@ async function findTgClient(db: Pool, chatId: number): Promise<ClientRow | null>
   return rows[0] ?? null
 }
 
-async function handleUpdate(deps: TgDeps, update: TgUpdate): Promise<void> {
+/** 导出仅为测试：并发派发与轮询循环都在 dispatchUpdate/startTelegramPolling。 */
+export async function handleUpdate(deps: TgDeps, update: TgUpdate): Promise<void> {
   const msg = update.message
   if (!msg?.text) return
   // 防自食回声（鸦巢教训）：bot 自己的消息永不当作用户输入
   if (msg.from?.is_bot) return
   if (msg.chat.type !== 'private') return
 
-  // §1.2 幂等去重：滚动部署双 pod 同时轮询同一 token 时，防止同一条 update 被两个实例各处理一次
+  // §1.2 幂等去重：滚动部署双 pod 同时轮询同一 token 时，防止同一条 update 被两个实例各处理一次。
+  // TTL 300s：处理耗时上限（工具回路 + 排队）可能超过旧值 120s，崩溃重启后的重投会漏过去
   const dedupKey = `tg:processed:${update.update_id}`
-  const deduped = await deps.redis.set(dedupKey, '1', 'EX', 120, 'NX')
+  const deduped = await deps.redis.set(dedupKey, '1', 'EX', 300, 'NX')
   if (!deduped) {
     console.log(`[telegram] dedup skip update_id=${update.update_id}`)
     return
   }
-
   const chatId = msg.chat.id
   const client = await findTgClient(deps.db, chatId)
   if (!client) {
@@ -133,6 +148,23 @@ async function handleUpdate(deps: TgDeps, update: TgUpdate): Promise<void> {
   }
   const user = await getUserById(deps.db, client.user_id)
   if (!user) return
+
+  // 触达回应闭环（§19.6 防纠缠的另一半）：用户「回复」某条触达消息 = 明确回应信号 →
+  // 上报 user_engaged 消费 remention 邀请（REDEEMED 后上游不再注入）。回复文本照常走对话管线，
+  // 这里只补元数据上报；fire-and-forget，上报失败不阻塞回复、也不重复提醒用户
+  const replyTo = msg.reply_to_message?.message_id
+  if (replyTo !== undefined) {
+    const raw = await deps.redis.get(`tg:outreach:${chatId}:${replyTo}`).catch(() => null)
+    if (raw) {
+      const { claimId, content } = JSON.parse(raw) as { claimId?: string; content: string }
+      void deps.twig.intervene(user.id, claimId, content, { outcome: 'user_engaged' })
+        .then(() => console.log(`[telegram] outreach engagement reported claim=${claimId?.slice(0, 8) ?? 'none'}`))
+        .catch((e: unknown) => {
+          errorsTotal.inc({ error_type: 'outreach_engage_report', provider: 'twig' })
+          console.error('[telegram] user_engaged report failed:', e instanceof Error ? e.message : e)
+        })
+    }
+  }
 
   // 生命体征（体感慢的特效药）：TG 非流式，生成期间零反馈最像「挂了」——
   // 每 4s 续一次 typing，超过 25s 发一次「还在想」心跳；回复发送前全部撤下
@@ -191,6 +223,45 @@ async function handleUpdate(deps: TgDeps, update: TgUpdate): Promise<void> {
   console.log(`[telegram] replied chat_id=${chatId} route=${payload.mnemosyne?.route_reason ?? '?'}`)
 }
 
+// ── 并发派发（记档项「TG 轮询串行堵消息」的收口）────────────────────────────
+// 串行形态下一条消息的工具回路（60s deadline + 单腿 90s）会堵住后续所有消息；
+// 并发上限之外，同一 chat 必须保序——防抖（60s 窗口）与装配顺序都建立在同会话串行之上。
+const TG_MAX_CONCURRENCY = Number(process.env.TG_MAX_CONCURRENCY || 4)
+const chatChains = new Map<number, Promise<void>>()
+let tgActive = 0
+const tgWaiters: (() => void)[] = []
+
+async function acquireSlot(): Promise<void> {
+  if (tgActive < TG_MAX_CONCURRENCY) { tgActive++; return }
+  await new Promise<void>(resolve => tgWaiters.push(resolve))
+  tgActive++
+}
+
+function releaseSlot(): void {
+  tgActive--
+  tgWaiters.shift()?.()
+}
+
+function dispatchUpdate(deps: TgDeps, update: TgUpdate): void {
+  const chatId = update.message?.chat.id ?? 0
+  const prev = chatChains.get(chatId) ?? Promise.resolve()
+  const task = prev.then(() => acquireSlot().then(async () => {
+    try {
+      await handleUpdate(deps, update)
+    } catch (e) {
+      console.error('[telegram] update failed:', e instanceof Error ? e.message : e)
+    } finally {
+      releaseSlot()
+    }
+  }))
+  const settled = task.then(() => undefined, () => undefined)
+  chatChains.set(chatId, settled)
+  // 链尾自清：处理完时若当前链尾仍是自己（没有新消息挂上来）则移除，Map 不随 chat 数无界增长
+  void settled.finally(() => {
+    if (chatChains.get(chatId) === settled) chatChains.delete(chatId)
+  })
+}
+
 export function startTelegramPolling(deps: TgDeps): void {
   const token = deps.botToken || env.TELEGRAM_BOT_TOKEN
   if (!token) {
@@ -226,11 +297,8 @@ export function startTelegramPolling(deps: TgDeps): void {
         })
         for (const u of updates) {
           offset = u.update_id + 1
-          try {
-            await handleUpdate(deps, u)
-          } catch (e) {
-            console.error('[telegram] update failed:', e instanceof Error ? e.message : e)
-          }
+          // 有界并发派发（同 chat 保序）：不再 await——工具回路慢时后续消息照常进
+          dispatchUpdate(deps, u)
         }
       } catch (e) {
         console.error('[telegram] poll error, backoff 5s:', e instanceof Error ? e.message : e)
@@ -240,8 +308,17 @@ export function startTelegramPolling(deps: TgDeps): void {
   })()
 }
 
-/** Huginn 出站（OutreachDeliverer 的 webhook 落点）：向绑定的 TG chat 投递触达文案。 */
-export async function outboundToTelegram(deps: { db: Pool; botToken: string }, content: string, chatId?: number): Promise<{ sent: number }> {
+/** 触达回应映射 TTL：7 天内回复旧触达仍可被关联（再提邀请本身 30 天过期，取较短防线） */
+const OUTREACH_REPLY_TTL_SEC = 7 * 24 * 3600
+
+/** Huginn 出站（OutreachDeliverer 的 webhook 落点）：向绑定的 TG chat 投递触达文案。
+ *  带 meta（claimId+content）时按 message_id 落回应映射——用户回复该消息即上报 user_engaged。 */
+export async function outboundToTelegram(
+  deps: { db: Pool; botToken: string; redis?: Redis },
+  content: string,
+  chatId?: number,
+  meta?: { claimId: string; content: string },
+): Promise<{ sent: number }> {
   const token = deps.botToken || env.TELEGRAM_BOT_TOKEN
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN empty')
   let targets: number[] = []
@@ -255,7 +332,14 @@ export async function outboundToTelegram(deps: { db: Pool; botToken: string }, c
   }
   if (targets.length === 0) throw new Error('no bound telegram chats')
   for (const id of targets) {
-    await sendTelegram(token, id, content)
+    const messageIds = await sendTelegram(token, id, content)
+    if (deps.redis && meta) {
+      for (const messageId of messageIds) {
+        await deps.redis
+          .set(`tg:outreach:${id}:${messageId}`, JSON.stringify({ claimId: meta.claimId, content: meta.content }), 'EX', OUTREACH_REPLY_TTL_SEC)
+          .catch(() => undefined)
+      }
+    }
   }
   return { sent: targets.length }
 }
