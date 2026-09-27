@@ -31,6 +31,8 @@ export interface ClientRow {
   scopes: string[]
   is_active: boolean
   metadata: Record<string, unknown>
+  created_at?: Date
+  last_seen_at?: Date
 }
 
 export class IdentityError extends Error {
@@ -274,6 +276,65 @@ export interface WebLoginResult {
   rotated: boolean
 }
 
+/* ---------- 用户自助 client 管理（BFF /v1/web/clients，settings 页） ----------
+ * UNIQUE(user_id, client_type)：每类型一张牌。签发=补缺类型；轮换=旧 key 立即失效；
+ * 吊销=is_active=false（Huginn 投递与该 key 认证同时停）。所有路径 user_id 钉死调用者。 */
+
+export async function listClients(db: Db, userId: string): Promise<ClientRow[]> {
+  const { rows } = await db.query<ClientRow>(
+    `SELECT id, user_id, client_type, key_hash, display_name, webhook_url, scopes, is_active, metadata, created_at, last_seen_at
+       FROM clients WHERE user_id = $1 ORDER BY created_at`,
+    [userId],
+  )
+  return rows
+}
+
+export async function issueClient(
+  db: Db,
+  userId: string,
+  clientType: string,
+  displayName?: string,
+): Promise<string> {
+  const clientKey = generateClientKey()
+  try {
+    await db.query(
+      `INSERT INTO clients (user_id, client_type, key_hash, display_name, scopes)
+       VALUES ($1, $2, $3, $4, '{chat}')`,
+      [userId, clientType, sha256Hex(clientKey), displayName ?? null],
+    )
+  } catch (e) {
+    if (isUniqueViolation(e)) throw new IdentityError(409, 'client_type_exists', `client of type '${clientType}' already exists; rotate instead`)
+    throw e
+  }
+  return clientKey
+}
+
+/** 用户自助轮换：必须持有该 client（user_id 钉死），web 轮换走同参旧路径 rotateClientKey 亦可。 */
+export async function rotateUserClient(db: Db, userId: string, clientId: string): Promise<string> {
+  const owned = await db.query<{ id: string }>(
+    'SELECT id FROM clients WHERE id = $1 AND user_id = $2',
+    [clientId, userId],
+  )
+  if (!owned.rows[0]) throw new IdentityError(404, 'client_not_found', 'no such client for this user')
+  const clientKey = generateClientKey()
+  await db.query('UPDATE clients SET key_hash = $1, is_active = TRUE WHERE id = $2', [sha256Hex(clientKey), clientId])
+  return clientKey
+}
+
+export async function setUserClientActive(db: Db, userId: string, clientId: string, active: boolean): Promise<void> {
+  const { rows } = await db.query<{ id: string; client_type: string }>(
+    'SELECT id, client_type FROM clients WHERE id = $1 AND user_id = $2',
+    [clientId, userId],
+  )
+  const row = rows[0]
+  if (!row) throw new IdentityError(404, 'client_not_found', 'no such client for this user')
+  if (!active && row.client_type === 'web') {
+    // 吊销当前登录用的 web client = 自锁出面板；轮换 key 是「换锁」，吊销是「拆门」
+    throw new IdentityError(400, 'self_revoke_forbidden', 'cannot revoke the web client you are logged in with; rotate instead')
+  }
+  await db.query('UPDATE clients SET is_active = $1 WHERE id = $2', [active, clientId])
+}
+
 /**
  * Web Dashboard 登录（BFF /v1/web/login）——master_key 换 web client_key 的可重复路径。
  * UNIQUE(user_id, client_type) 使 register 无法二次注册 web；此处语义为：
@@ -305,7 +366,8 @@ export async function webLogin(
     [user.id],
   )
   if (rows[0]) {
-    await db.query('UPDATE clients SET key_hash = $1 WHERE id = $2', [sha256Hex(clientKey), rows[0].id])
+    // 轮换即恢复：master_key 已证身份，被吊销的 web client 登录后自动复活（rotateUserClient 同语义）
+    await db.query('UPDATE clients SET key_hash = $1, is_active = TRUE WHERE id = $2', [sha256Hex(clientKey), rows[0].id])
     limiter.reset(limiterKey)
     return { clientKey, user, rotated: true }
   }

@@ -22,8 +22,9 @@ import type { Db } from '../db.js'
 import type { Redis } from 'ioredis'
 import { TwigError } from '../memory/TwigAdapter.js'
 import type { TwigAdapter } from '../memory/TwigAdapter.js'
-import { webLogin, type AttemptLimiter, type ClientRow, type UserRow } from '../identity/service.js'
+import { webLogin, listClients, issueClient, rotateUserClient, setUserClientActive, type AttemptLimiter, type ClientRow, type UserRow } from '../identity/service.js'
 import { loadHuginnConfig } from '../outreach/policy.js'
+import type { McpGatewayClient } from '../tools/executor.js'
 import { extractClientKey, rateLimit } from './shared.js'
 
 export interface WebDeps {
@@ -33,6 +34,8 @@ export interface WebDeps {
   limiter: AttemptLimiter
   identityAuth: (clientKey: string) => Promise<ClientRow | null>
   userOf: (userId: string) => Promise<UserRow | null>
+  /** forge 页 /v1/web/mcp/health 代理用 */
+  mcp: McpGatewayClient
 }
 
 const LoginSchema = z.object({
@@ -387,6 +390,160 @@ export function registerWebRoutes(app: FastifyInstance, deps: WebDeps): void {
         ),
         daily_cap: dailyCap,
       },
+    }
+  })
+
+  // —— client 管理（settings 页；user_id 钉死认证用户）——
+  // web 是身份体系里的普通 client：签发/轮换/吊销都是「管自己的牌」。明文 client_key 仅返回一次。
+  const IssueSchema = z.object({
+    client_type: z.enum(['operit', 'rikkahub', 'telegram', 'mobile', 'api']),
+    display_name: z.string().max(255).optional(),
+  })
+
+  app.get('/v1/web/clients', async (req, reply) => {
+    const ctx = await requireUser(deps, req, reply)
+    if (!ctx) return
+    const rows = await listClients(deps.db, ctx.user.id)
+    // key_hash 不出服务端；明文本来就不存
+    return {
+      clients: rows.map(r => ({
+        id: r.id,
+        client_type: r.client_type,
+        display_name: r.display_name,
+        is_active: r.is_active,
+        webhook_url: r.webhook_url,
+        created_at: r.created_at,
+      })),
+    }
+  })
+
+  app.post('/v1/web/clients', async (req, reply) => {
+    const ctx = await requireUser(deps, req, reply)
+    if (!ctx) return
+    const parsed = IssueSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { message: 'bad_request', detail: parsed.error.message } })
+    }
+    const clientKey = await issueClient(deps.db, ctx.user.id, parsed.data.client_type, parsed.data.display_name)
+    return { client_key: clientKey } // 仅此一次返回明文
+  })
+
+  app.post('/v1/web/clients/:id/rotate', async (req, reply) => {
+    const ctx = await requireUser(deps, req, reply)
+    if (!ctx) return
+    const { id } = req.params as { id?: string }
+    if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
+      return reply.code(400).send({ error: { message: 'bad_request', type: 'bad_request' } })
+    }
+    const clientKey = await rotateUserClient(deps.db, ctx.user.id, id)
+    return { client_key: clientKey } // 仅此一次返回明文
+  })
+
+  app.post('/v1/web/clients/:id/active', async (req, reply) => {
+    const ctx = await requireUser(deps, req, reply)
+    if (!ctx) return
+    const { id } = req.params as { id?: string }
+    if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
+      return reply.code(400).send({ error: { message: 'bad_request', type: 'bad_request' } })
+    }
+    const parsed = z.object({ active: z.boolean() }).safeParse(req.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { message: 'bad_request', detail: parsed.error.message } })
+    }
+    try {
+      await setUserClientActive(deps.db, ctx.user.id, id, parsed.data.active)
+      return { ok: true, is_active: parsed.data.active }
+    } catch (e) {
+      const status = (e as { status?: unknown }).status
+      const code = (e as { code?: unknown }).code
+      if (typeof status === 'number' && typeof code === 'string') {
+        return reply.code(status).send({ error: { message: code, type: code } })
+      }
+      throw e
+    }
+  })
+
+  // —— Huginn 触达面板（console 页出站版面；mockups/console.html 信息的落地版）——
+  app.get('/v1/web/outreach/summary', async (req, reply) => {
+    const ctx = await requireUser(deps, req, reply)
+    if (!ctx) return
+    const [byStatus, cfgRow] = await Promise.all([
+      deps.db.query<{ status: string; n: string }>(
+        `SELECT status, COUNT(*)::text AS n FROM outreach
+          WHERE user_id = $1 AND reservation_date > CURRENT_DATE - INTERVAL '7 days'
+          GROUP BY status`,
+        [ctx.user.id],
+      ),
+      deps.db.query<{ delivered: string; pending: string }>(
+        `SELECT COUNT(*) FILTER (WHERE status IN ('delivered','completed','intervention_pending'))::text AS delivered,
+                COUNT(*) FILTER (WHERE status IN ('reserved','generated','delivery_pending'))::text AS pending
+           FROM outreach WHERE user_id = $1 AND reservation_date = CURRENT_DATE`,
+        [ctx.user.id],
+      ),
+    ])
+    let cfg: { enabled: boolean; daily_cap: number; quiet_hours: string | null; scan_interval: string | null } = {
+      enabled: false, daily_cap: 0, quiet_hours: null, scan_interval: null,
+    }
+    try {
+      const h = loadHuginnConfig()
+      cfg = { enabled: h.enabled, daily_cap: h.daily_cap, quiet_hours: h.quiet_hours ?? null, scan_interval: h.scan_interval ?? null }
+    } catch { /* 配置缺失不拖垮面板 */ }
+    const statusCounts: Record<string, number> = {}
+    for (const r of byStatus.rows) statusCounts[r.status] = Number(r.n)
+    return {
+      config: cfg,
+      today: { delivered: Number(cfgRow.rows[0]?.delivered ?? 0), pending: Number(cfgRow.rows[0]?.pending ?? 0) },
+      status_counts_7d: statusCounts,
+    }
+  })
+
+  app.get('/v1/web/outreach/log', async (req, reply) => {
+    const ctx = await requireUser(deps, req, reply)
+    if (!ctx) return
+    const q = req.query as Record<string, string | undefined>
+    const limit = Math.max(1, Math.min(Math.floor(num(q.limit ?? null) ?? 30), 100))
+    const { rows } = await deps.db.query<{
+      id: string
+      outreach_type: string | null
+      status: string
+      slot_number: number | null
+      claim_id: string | null
+      filter_reason: string | null
+      delivery_attempts: number | null
+      last_delivery_error: string | null
+      created_at: Date | string | null
+      delivered_at: Date | string | null
+    }>(
+      `SELECT id, outreach_type, status, slot_number, claim_id, filter_reason,
+              delivery_attempts, last_delivery_error, created_at, delivered_at
+         FROM outreach WHERE user_id = $1
+        ORDER BY COALESCE(delivered_at, created_at) DESC LIMIT $2`,
+      [ctx.user.id, limit],
+    )
+    return {
+      rows: rows.map(r => ({
+        id: r.id,
+        outreach_type: r.outreach_type,
+        status: r.status,
+        slot_number: r.slot_number,
+        has_claim: r.claim_id != null,
+        filter_reason: r.filter_reason,
+        delivery_attempts: r.delivery_attempts,
+        last_delivery_error: r.last_delivery_error,
+        created_at: iso(r.created_at),
+        delivered_at: r.delivered_at ? iso(r.delivered_at) : null,
+      })),
+    }
+  })
+
+  // —— MCP 网关健康代理（forge 页三卡数据源；凭证在服务端）——
+  app.get('/v1/web/mcp/health', async (req, reply) => {
+    const ctx = await requireUser(deps, req, reply)
+    if (!ctx) return
+    try {
+      return await deps.mcp.getHealth()
+    } catch (e) {
+      return reply.code(502).send({ error: { message: 'gateway_unreachable', type: 'gateway_unreachable' } })
     }
   })
 }
