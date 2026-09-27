@@ -14,6 +14,7 @@
  */
 import type { Pool } from 'pg'
 import type { TwigAdapter } from '../memory/TwigAdapter.js'
+import type { MemoryIngestionPipeline } from '../memory/ingestion.js'
 import type { WebhookGuardOptions } from '../identity/webhookGuard.js'
 import { deliverOutreach } from './deliver.js'
 import type { HuginnConfig } from './policy.js'
@@ -40,6 +41,8 @@ interface PendingDeliveryRow {
 export interface OutboxDeps {
   db: Pool
   twig: TwigAdapter
+  /** §3.6 内生标记的单一上报入口（此前直调 twig.intervene，入口成了摆设） */
+  ingestion: MemoryIngestionPipeline
   guard: WebhookGuardOptions
   cfg: HuginnConfig
   log?: (msg: string) => void
@@ -112,7 +115,7 @@ export async function runOutboxWorker(deps: OutboxDeps): Promise<void> {
     if (Date.now() < eligibleAt) continue
 
     try {
-      await deps.twig.intervene(row.eternal_id, row.claim_id ?? undefined, row.content, {
+      await deps.ingestion.reportIntervention(row.eternal_id, row.claim_id ?? undefined, row.content, {
         evidenceLevel: 'post_intervention',
       })
       await db.query(
