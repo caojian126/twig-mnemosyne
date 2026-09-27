@@ -1,0 +1,140 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "title": "Mnemosyne · 运行水位",
+  "uid": "mnemosyne-core",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "请求速率 / 错误速率",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(mnemosyne_requests_total[5m]))",
+          "legendFormat": "requests"
+        },
+        {
+          "expr": "sum(rate(mnemosyne_errors_total[5m]))",
+          "legendFormat": "errors"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "延迟分位（request_total）",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(mnemosyne_latency_seconds_bucket{stage=\"request_total\"}[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(mnemosyne_latency_seconds_bucket{stage=\"request_total\"}[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "自建缓存命中",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(mnemosyne_cache_hits_total[5m])) by (cache_type)",
+          "legendFormat": "{{cache_type}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Token 用量 / 估算成本",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(mnemosyne_tokens_total[5m])) by (type)",
+          "legendFormat": "{{type}} tok/s"
+        },
+        {
+          "expr": "sum(rate(mnemosyne_cost_usd[5m]))",
+          "legendFormat": "usd/s"
+        }
+      ]
+    }
+  ]
+}

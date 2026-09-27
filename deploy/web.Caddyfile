@@ -19,8 +19,9 @@
 	handle /health {
 		reverse_proxy {$MNEMOSYNE_UPSTREAM:localhost:8000}
 	}
+	# /metrics 不公网反代：Prometheus 从内网直抓 mnemosyne:8000（或配 METRICS_TOKEN）
 	handle /metrics {
-		reverse_proxy {$MNEMOSYNE_UPSTREAM:localhost:8000}
+		respond 403
 	}
 
 	# Dashboard 静态站（Vite MPA：/book → book.html；无 SPA fallback 需求）

@@ -1,6 +1,11 @@
 # docker-compose.yml — §13.3（VULN-08 修复段 + v0.3.0 增补）
-# profiles: qdrant/monitoring/local-lane 默认不启；个人生产 2C4G 形态 = 默认服务集
-version: '3.8'
+# profiles: vector-kg/monitoring/local-lane 默认不启；个人生产 2C4G 形态 = 默认服务集
+# 全栈 healthcheck + depends_on 条件启动（2026-09-28）：mnemosyne 不再在 postgres 未就绪时抢跑
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   # ─── Runtime Core ───
@@ -15,7 +20,7 @@ services:
       - PORT=8000
       - DATABASE_URL=postgresql://mnemosyne:${DB_PASSWORD}@postgres:5432/mnemosyne
       - REDIS_URL=redis://redis:6379
-      - QDRANT_URL=http://qdrant:6333
+      # QDRANT_URL 预留（vector-kg profile）：runtime 侧尚无消费者，接通前不注入
       - TWIG_URL=http://twig-memory:7300
       - MUNINN_AUTH_TOKEN=${MUNINN_AUTH_TOKEN}
       - LITELLM_URL=http://litellm:4000
@@ -29,6 +34,8 @@ services:
       - BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-}
       - ALLOW_INSECURE_WEBHOOK=${ALLOW_INSECURE_WEBHOOK:-0}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
+      - TRUST_PROXY_HOPS=${TRUST_PROXY_HOPS:-1}
       - PRIVACY_LOCAL_THRESHOLD=${PRIVACY_LOCAL_THRESHOLD:-70}
       - CRISIS_SILENCE_HOURS=${CRISIS_SILENCE_HOURS:-24}
       - MAX_MESSAGE_TOKENS=${MAX_MESSAGE_TOKENS:-4096}
@@ -38,22 +45,36 @@ services:
       - REFLECT_CRON=${REFLECT_CRON:-30 18 * * *}
       - REFLECT_ACTIVE_HOURS=${REFLECT_ACTIVE_HOURS:-24}
       - REFLECT_TIMEOUT_MS=${REFLECT_TIMEOUT_MS:-900000}
-      # v0.3.0 新增：TTS Provider 配置
+      # TTS Provider 配置（§21.3：云端优先链 elevenlabs→siliconflow→openai）
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
       - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-}
-      - GOOGLE_TTS_API_KEY=${GOOGLE_TTS_API_KEY:-}
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY:-}
+      - TTS_SILICONFLOW_VOICE=${TTS_SILICONFLOW_VOICE:-}
+      - TTS_OPENAI_VOICE=${TTS_OPENAI_VOICE:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       # v0.3.0 新增：本地模型边车（形态 A 时指向 tailnet）
       - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
     depends_on:
-      - postgres
-      - redis
-      - twig-memory
-      - litellm
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      twig-memory:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
     volumes:
       - ./config:/app/config:ro
       - ./skills:/app/skills:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 1g
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
 
@@ -79,7 +100,18 @@ services:
     volumes:
       - ./deploy/compose/litellm.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/health/liveliness"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
 
@@ -97,7 +129,20 @@ services:
       - BROKER_URL=http://mnemosyne:8000
       - BROKER_INTERNAL_TOKEN=${BROKER_INTERNAL_TOKEN}
       - MCP_STATE_PATH=/app/data/dynamic-servers.json
+      # env 预注册清单（[{name,url,headers?,skill_document?}]；Bearer 只走 env 不入 git）
+      - MCP_BOOT_REGISTRATIONS=${MCP_BOOT_REGISTRATIONS:-}
+      # builtin 学术工具的凭证/礼貌头（缺省走无 key 兜底池）
+      - SEMANTIC_SCHOLAR_API_KEY=${SEMANTIC_SCHOLAR_API_KEY:-}
+      - OPENALEX_EMAIL=${OPENALEX_EMAIL:-}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Shanghai}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
 
@@ -113,7 +158,15 @@ services:
       - MUNINN_TZ=${MUNINN_TZ:-Asia/Shanghai}
     volumes:
       - twig_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7300/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
 
@@ -130,7 +183,15 @@ services:
       - ./deploy/compose/init-litellm.sh:/docker-entrypoint-initdb.d/20-litellm.sh:ro
     ports:
       - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mnemosyne -d mnemosyne"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 512m
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
 
@@ -141,7 +202,14 @@ services:
       - redis_data:/data
     ports:
       - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: 128m
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
 
@@ -153,6 +221,7 @@ services:
     ports:
       - "127.0.0.1:6333:6333"
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
     profiles: ["vector-kg"]
@@ -162,10 +231,12 @@ services:
     image: prom/prometheus:latest
     volumes:
       - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/compose/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
     profiles: ["monitoring"]
@@ -174,12 +245,16 @@ services:
     image: grafana/grafana:latest
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # provisioning：datasource（prometheus）+ dashboards provider + 面板 JSON，起容器即用
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "127.0.0.1:3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
     profiles: ["monitoring"]
@@ -192,6 +267,7 @@ services:
     ports:
       - "127.0.0.1:11434:11434"
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
     profiles: ["local-lane"]
@@ -208,6 +284,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - mnemosyne
 

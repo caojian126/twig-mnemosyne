@@ -1,0 +1,9 @@
+# Grafana datasource provisioning：起容器即连 Prometheus，不用手工点 UI
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

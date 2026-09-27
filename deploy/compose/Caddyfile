@@ -20,8 +20,10 @@ mnemosyne.yourdomain.com {
     handle /v1/* {
         reverse_proxy mnemosyne:8000
     }
+    # /metrics 不再公网反代（status.md 记档项收口）：抓取方走内网直连 mnemosyne:8000；
+    # 配了 METRICS_TOKEN 的抓取器可用 /v1/admin 同款 Bearer 从内网取
     handle /metrics {
-        reverse_proxy mnemosyne:8000
+        respond 403
     }
     handle /health {
         reverse_proxy mnemosyne:8000

@@ -1,0 +1,12 @@
+# 面板文件提供者：扫描 /var/lib/grafana/dashboards（compose 挂 ./grafana/dashboards）
+apiVersion: 1
+providers:
+  - name: mnemosyne
+    orgId: 1
+    folder: Mnemosyne
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
