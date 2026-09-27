@@ -223,3 +223,176 @@ describe('web 写操作路由', () => {
     await app.close()
   })
 })
+
+/* ---------- client 管理 / outreach 面板 / gateway health（settings·console·forge 页） ---------- */
+describe('web client 管理与面板路由', () => {
+  const CLIENT = { id: 'cw-1', user_id: 'u-1', client_type: 'web' }
+  const redisOk = { incr: async () => 1, expire: async () => 1, get: async () => null, set: async () => null, del: async () => null, ping: async () => 'PONG' }
+
+  function buildApp(opts: {
+    db?: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> }
+    mcp?: Record<string, unknown>
+  } = {}) {
+    const app = Fastify({ logger: false })
+    registerWebRoutes(app, {
+      db: opts.db ?? { query: async () => ({ rows: [] }) },
+      redis: redisOk,
+      twig: {},
+      limiter: new AttemptLimiter(),
+      identityAuth: async (k: string) => (k === 'mn_ok' ? CLIENT : null),
+      userOf: async () => USER,
+      mcp: opts.mcp ?? {},
+    } as never)
+    return app
+  }
+
+  it('GET /v1/web/clients：列表不带 key_hash（明文与哈希都不出服务端）', async () => {
+    const app = buildApp({
+      db: { query: async () => ({ rows: [{ id: 'c-tg', user_id: 'u-1', client_type: 'telegram', key_hash: 'SECRET', display_name: 'tg', webhook_url: null, scopes: ['chat'], is_active: true, metadata: {}, created_at: '2026-09-01T00:00:00Z' }] }) },
+    })
+    const res = await app.inject({ method: 'GET', url: '/v1/web/clients', headers: { 'x-client-key': 'mn_ok' } })
+    expect(res.statusCode).toBe(200)
+    const body = res.json() as { clients: { key_hash?: string; client_type: string }[] }
+    expect(body.clients).toHaveLength(1)
+    expect(body.clients[0]!.client_type).toBe('telegram')
+    expect(body.clients[0]!.key_hash).toBeUndefined()
+    await app.close()
+  })
+
+  it('POST /v1/web/clients：签发缺省类型，明文仅此一次；重复类型 409', async () => {
+    const inserted: unknown[][] = []
+    const app = buildApp({
+      db: {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes('INSERT INTO clients')) {
+            inserted.push(params)
+            return { rows: [] }
+          }
+          throw new Error(`unexpected: ${sql.slice(0, 60)}`)
+        },
+      },
+    })
+    const ok = await app.inject({
+      method: 'POST', url: '/v1/web/clients',
+      headers: { 'x-client-key': 'mn_ok', 'content-type': 'application/json' },
+      payload: { client_type: 'api', display_name: '脚本' },
+    })
+    expect(ok.statusCode).toBe(200)
+    const body = ok.json() as { client_key: string }
+    expect(body.client_key.startsWith('mn_')).toBe(true)
+    expect(inserted[0]?.[0]).toBe(USER.id) // user_id 钉死认证用户
+    expect(inserted[0]?.[1]).toBe('api')
+
+    const bad = await app.inject({
+      method: 'POST', url: '/v1/web/clients',
+      headers: { 'x-client-key': 'mn_ok', 'content-type': 'application/json' },
+      payload: { client_type: 'nonsense' },
+    })
+    expect(bad.statusCode).toBe(400)
+    await app.close()
+  })
+
+  it('POST /v1/web/clients/:id/active：吊销 web 自身被拒（自锁防护），其他类型放行', async () => {
+    const updates: unknown[][] = []
+    const app = buildApp({
+      db: {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes('SELECT id, client_type FROM clients')) {
+            return { rows: [{ id: params[0], client_type: (params[0] as string).endsWith('a') ? 'web' : 'telegram' }] }
+          }
+          if (sql.includes('UPDATE clients SET is_active')) {
+            updates.push(params)
+            return { rows: [] }
+          }
+          return { rows: [] }
+        },
+      },
+    })
+    const self = await app.inject({
+      method: 'POST', url: '/v1/web/clients/00000000-0000-4000-8000-00000000000a/active',
+      headers: { 'x-client-key': 'mn_ok', 'content-type': 'application/json' },
+      payload: { active: false },
+    })
+    expect(self.statusCode).toBe(400)
+    expect(self.json().error.type).toBe('self_revoke_forbidden')
+
+    const tg = await app.inject({
+      method: 'POST', url: '/v1/web/clients/00000000-0000-4000-8000-00000000000b/active',
+      headers: { 'x-client-key': 'mn_ok', 'content-type': 'application/json' },
+      payload: { active: false },
+    })
+    expect(tg.statusCode).toBe(200)
+    expect(updates[0]).toEqual([false, '00000000-0000-4000-8000-00000000000b'])
+    await app.close()
+  })
+
+  it('POST /v1/web/clients/:id/rotate：归属校验（非本人 404）+ 明文一次性返回', async () => {
+    const app = buildApp({
+      db: {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes('SELECT id FROM clients WHERE id = $1 AND user_id = $2')) {
+            return { rows: params[0] === '00000000-0000-4000-8000-00000000000c' ? [{ id: '00000000-0000-4000-8000-00000000000c' }] : [] }
+          }
+          if (sql.includes('UPDATE clients SET key_hash')) return { rows: [] }
+          return { rows: [] }
+        },
+      },
+    })
+    const ok = await app.inject({
+      method: 'POST', url: '/v1/web/clients/00000000-0000-4000-8000-00000000000c/rotate',
+      headers: { 'x-client-key': 'mn_ok' },
+    })
+    expect(ok.statusCode).toBe(200)
+    expect((ok.json() as { client_key: string }).client_key.startsWith('mn_')).toBe(true)
+
+    const notMine = await app.inject({
+      method: 'POST', url: '/v1/web/clients/00000000-0000-4000-8000-00000000000d/rotate',
+      headers: { 'x-client-key': 'mn_ok' },
+    })
+    expect(notMine.statusCode).toBe(404)
+    await app.close()
+  })
+
+  it('GET /v1/web/outreach/summary + /log：只读聚合与脱敏字段', async () => {
+    const queries: string[] = []
+    const app = buildApp({
+      db: {
+        query: async (sql: string) => {
+          queries.push(sql)
+          if (sql.includes('GROUP BY status')) return { rows: [{ status: 'delivered', n: '2' }, { status: 'filtered', n: '1' }] }
+          if (sql.includes("status IN ('reserved','generated','delivery_pending')")) return { rows: [{ delivered: '1', pending: '1' }] }
+          if (sql.includes('FROM outreach WHERE user_id')) {
+            return { rows: [{ id: 'o-1', outreach_type: 'vein-nudge', status: 'delivered', slot_number: 1, claim_id: 'claim-9', filter_reason: null, delivery_attempts: 1, last_delivery_error: null, created_at: '2026-09-28T00:00:00Z', delivered_at: '2026-09-28T00:00:05Z' }] }
+          }
+          return { rows: [] }
+        },
+      },
+    })
+    const summary = await app.inject({ method: 'GET', url: '/v1/web/outreach/summary', headers: { 'x-client-key': 'mn_ok' } })
+    expect(summary.statusCode).toBe(200)
+    const s = summary.json() as { status_counts_7d: Record<string, number>; today: { delivered: number } }
+    expect(s.status_counts_7d.delivered).toBe(2)
+    expect(s.today.delivered).toBe(1)
+
+    const log = await app.inject({ method: 'GET', url: '/v1/web/outreach/log?limit=5', headers: { 'x-client-key': 'mn_ok' } })
+    expect(log.statusCode).toBe(200)
+    const l = log.json() as { rows: { has_claim: boolean; claim_id?: string; status: string }[] }
+    expect(l.rows[0]!.status).toBe('delivered')
+    expect(l.rows[0]!.has_claim).toBe(true)
+    expect(l.rows[0]!.claim_id).toBeUndefined() // 原始 claim id 不出面板（脱敏为布尔）
+    await app.close()
+  })
+
+  it('GET /v1/web/mcp/health：代理 gateway /health；不可达 → 502', async () => {
+    const ok = buildApp({ mcp: { getHealth: async () => ({ ok: true, servers: [{ name: 'core', type: 'builtin', enabled: true, connected: true, tools: 1, last_error: null }] }) } })
+    const good = await ok.inject({ method: 'GET', url: '/v1/web/mcp/health', headers: { 'x-client-key': 'mn_ok' } })
+    expect(good.statusCode).toBe(200)
+    expect((good.json() as { servers: unknown[] }).servers).toHaveLength(1)
+    await ok.close()
+
+    const bad = buildApp({ mcp: { getHealth: async () => { throw new Error('conn refused') } } })
+    const failing = await bad.inject({ method: 'GET', url: '/v1/web/mcp/health', headers: { 'x-client-key': 'mn_ok' } })
+    expect(failing.statusCode).toBe(502)
+    await bad.close()
+  })
+})
