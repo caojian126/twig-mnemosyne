@@ -8,6 +8,7 @@
  * 在工具执行回路（MCP gateway fork）落地后接入；当前单分类器调用已满足泳道收敛语义。
  */
 import type { ModelGateway, ChatMessage } from '../gateways/litellm.js'
+import { errorsTotal } from '../observability/metrics.js'
 
 export type Lane = 'chat' | 'coding' | 'research' | 'tool'
 
@@ -39,6 +40,8 @@ export async function classifyLane(
     const word = res.content.trim().toLowerCase()
     return (VALID as string[]).includes(word) ? (word as Lane) : 'chat'
   } catch {
-    return 'chat' // 分类器不可用 → 默认泳道，绝不阻塞主路径
+    // 分类器不可用 → 默认泳道，绝不阻塞主路径；但「今天分类器挂了吗」必须可回答
+    errorsTotal.inc({ error_type: 'lane_classify_fallback', provider: 'litellm' })
+    return 'chat'
   }
 }

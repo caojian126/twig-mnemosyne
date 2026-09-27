@@ -1,9 +1,10 @@
 /**
- * Huginn 手动/独立入口：主管线扫描 + Outbox Worker。
+ * Huginn 手动/独立入口：主管线扫描 + Outbox Worker + 反刍扫描。
  * 容器内由 index.ts 自带调度；本脚本用于本地调试与外部 cron 托管形态。
  *
  *   npm run huginn -- --once scan
  *   npm run huginn -- --once outbox
+ *   npm run huginn -- --once reflect   （反刍扫描：近 N 小时活跃用户逐个异步点火）
  *   npm run huginn -- --loop
  */
 import { parseArgs } from 'node:util'
@@ -15,6 +16,8 @@ import { ModelGateway } from '../src/gateways/litellm.js'
 import { loadHuginnConfig } from '../src/outreach/policy.js'
 import { runScan, defaultGuard } from '../src/outreach/pipeline.js'
 import { runOutboxWorker } from '../src/outreach/outboxWorker.js'
+import { runReflectScan } from '../src/memory/reflectScan.js'
+import { MemoryIngestionPipeline } from '../src/memory/ingestion.js'
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -25,13 +28,24 @@ async function main(): Promise<void> {
   const twig = new TwigAdapter(env.TWIG_URL, env.MUNINN_AUTH_TOKEN)
   const gateway = new ModelGateway(env.LITELLM_URL, env.LITELLM_API_KEY)
   const scanDeps = { db: pool, twig, gateway, guard: defaultGuard(), cfg, log: (m: string) => console.log(m) }
-  const outboxDeps = { db: pool, twig, guard: scanDeps.guard, cfg, log: (m: string) => console.log(m) }
+  const ingestion = new MemoryIngestionPipeline(twig)
+  const outboxDeps = { db: pool, twig, ingestion, guard: scanDeps.guard, cfg, log: (m: string) => console.log(m) }
+  const reflectDeps = {
+    db: pool, twig,
+    activeHours: env.REFLECT_ACTIVE_HOURS, timeoutMs: env.REFLECT_TIMEOUT_MS,
+    log: (m: string) => console.log(m), warn: (m: string) => console.error(m),
+  }
 
   if (values.once === 'scan') {
     await runScan(scanDeps)
     await pool.end()
   } else if (values.once === 'outbox') {
     await runOutboxWorker(outboxDeps)
+    await pool.end()
+  } else if (values.once === 'reflect') {
+    const r = await runReflectScan(reflectDeps)
+    console.log(`[reflect] scanned=${r.scanned} ok=${r.ok} failed=${r.failed}`)
+    if (r.failures.length > 0) console.error('failures:', JSON.stringify(r.failures, null, 2))
     await pool.end()
   } else if (values.loop) {
     console.log(`[huginn] loop: scan="${cfg.scan_interval}" outbox=${cfg.outbox_worker_interval}s`)
@@ -52,7 +66,7 @@ async function main(): Promise<void> {
       }
     }, 30_000)
   } else {
-    console.error('usage: npm run huginn -- --once scan|outbox | --loop')
+    console.error('usage: npm run huginn -- --once scan|outbox|reflect | --loop')
     await pool.end()
     process.exit(2)
   }

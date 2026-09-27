@@ -43,10 +43,18 @@ export function loadHuginnConfig(dir = env.CONFIG_DIR): HuginnConfig {
       generation: { ...HUGINN_DEFAULTS.generation, ...(h.generation ?? {}) },
       outbox: { ...HUGINN_DEFAULTS.outbox, ...(h.outbox ?? {}) },
     }
-  } catch {
+  } catch (e) {
+    // yaml 写错静默回默认 = 运维改了没生效还不自知（daily_cap/quiet_hours 全回出厂）
+    if (!loadWarned) {
+      loadWarned = true
+      console.error('[huginn] config load failed, using defaults:', e instanceof Error ? e.message : e)
+    }
     return { ...HUGINN_DEFAULTS }
   }
 }
+
+/** 配置加载失败的告警只发一次：别让损坏的 yaml 每轮 scan 刷屏，也不能完全无声 */
+let loadWarned = false
 
 /** "01:00-08:00"（用户本地时区）；跨午夜区间自动回绕。 */
 export function inQuietHours(now: Date, tz: string | undefined, range: string): boolean {

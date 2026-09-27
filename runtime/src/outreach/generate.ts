@@ -8,6 +8,7 @@ import { isCrisis } from '../crisis/lexicon.js'
 import { clampTemperature } from '../context/modelRegistry.js'
 import type { HuginnConfig } from './policy.js'
 import type { OutreachCandidate } from './candidates.js'
+import { errorsTotal, outreachGenerationFallback } from '../observability/metrics.js'
 
 const GENERATION_CONSTRAINTS = `你是 Mnemosyne 的主动触达文案引擎（HeadlessHuginn）。根据给定的触达情境写一段简短的话发给用户。
 铁律：
@@ -40,9 +41,11 @@ export async function generateOutreach(
       const content = res.content.trim().slice(0, cfg.generation.max_chars)
       // 输出侧 crisis 词表复扫：踩线 → 换链重试；全链踩线 → 兜底文案
       if (content && !isCrisis(content)) return content
-    } catch {
-      continue // 沿链降级，与 §3.8 同语义
+    } catch (e) {
+      errorsTotal.inc({ error_type: 'outreach_generation', provider: 'litellm' })
+      continue // 沿链降级，与 §3.8 同语义——但「今天触达全是兜底文案」不能不可见
     }
   }
+  outreachGenerationFallback.inc()
   return SAFE_FALLBACK_OUTREACH
 }

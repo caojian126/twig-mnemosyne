@@ -6,7 +6,7 @@
  * MUNINN_AUTO_REFLECT 保持关闭（仅覆盖已加载用户），排程单一事实源在 Runtime 侧。
  */
 import type { Pool } from 'pg'
-import { reflectTotal } from '../observability/metrics.js'
+import { reflectScanDuration, reflectScanned, reflectTotal } from '../observability/metrics.js'
 import type { TwigAdapter } from './TwigAdapter.js'
 
 export interface ReflectScanDeps {
@@ -61,19 +61,22 @@ export async function runReflectScan(deps: ReflectScanDeps): Promise<ReflectScan
   )
 
   const result: ReflectScanResult = { scanned: rows.length, ok: 0, failed: 0, failures: [] }
+  const t0 = Date.now()
+  reflectScanned.inc(result.scanned)
   for (const { eternal_id } of rows) {
     try {
       // async 点火：202 立即返回，反刍在 twig 后台执行——不用长响应等它，也不再重试空排队
       const r = await deps.twig.reflect(eternal_id, deps.timeoutMs, { async: true })
       result.ok++
-      reflectTotal.inc({ outcome: 'ok' })
+      // outcome=queued：语义是「已受理」，twig 侧真实成败在其自身日志——别让指标名吹牛
+      reflectTotal.inc({ outcome: 'queued' })
       log(`[reflect] ok user ${eternal_id.slice(0, 8)}…: ${summarize(r)}`)
     } catch (first) {
       // 技术文档口径：失败重试 1 次
       try {
         const r = await deps.twig.reflect(eternal_id, deps.timeoutMs, { async: true })
         result.ok++
-        reflectTotal.inc({ outcome: 'ok' })
+        reflectTotal.inc({ outcome: 'queued' })
         log(`[reflect] ok after retry user ${eternal_id.slice(0, 8)}…: ${summarize(r)}`)
       } catch (second) {
         result.failed++
@@ -85,6 +88,7 @@ export async function runReflectScan(deps: ReflectScanDeps): Promise<ReflectScan
       }
     }
   }
+  reflectScanDuration.observe((Date.now() - t0) / 1000)
   if (result.scanned > 0) {
     log(`[reflect] scan done: ${result.ok}/${result.scanned} ok, ${result.failed} failed`)
   }

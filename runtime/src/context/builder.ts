@@ -13,6 +13,7 @@ import { VOICE_PERSONA_PROMPT } from '../voice/persona.js'
 import { narrativeVersionOf } from '../cache/keys.js'
 import { estimateTokens } from '../util/tokens.js'
 import { getForLane, formatCapabilities } from '../router/capabilities.js'
+import { errorsTotal } from '../observability/metrics.js'
 
 export interface BuildContext {
   user: { id: string; eternalId: string; preferences: Record<string, unknown> }
@@ -120,7 +121,11 @@ export class ContextBuilder {
       if (!packet) {
         try {
           packet = await this.twig.getContextPacket(ctx.user.eternalId)
-        } catch {
+        } catch (e) {
+          // fail-open 但必须可见（builder 注释自己承诺过的告警）：无叙事包 = 丢漂移警示等安全语义
+          errorsTotal.inc({ error_type: 'twig_packet_failed', provider: 'twig' })
+          console.warn('[builder] twig packet unavailable, continuing without narrative:',
+            e instanceof Error ? e.message : e)
           packet = null
         }
       }

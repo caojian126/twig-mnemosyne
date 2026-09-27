@@ -53,8 +53,27 @@ export const costUsd = new client.Counter({
 
 export const reflectTotal = new client.Counter({
   name: 'mnemosyne_reflect_total',
-  help: 'Rumination outcomes from the daily reflect scan',
+  help: 'Rumination outcomes from the daily reflect scan (ok = queued at twig; twig-side completion is observed in twig logs)',
   labelNames: ['outcome'] as const,
+  registers: [registry],
+})
+
+export const outreachGenerationFallback = new client.Counter({
+  name: 'mnemosyne_outreach_generation_fallback_total',
+  help: 'Outreach generations that exhausted the chain and fell back to the static copy',
+  registers: [registry],
+})
+
+export const reflectScanned = new client.Counter({
+  name: 'mnemosyne_reflect_scanned_total',
+  help: 'Users picked up by the daily reflect scan',
+  registers: [registry],
+})
+
+export const reflectScanDuration = new client.Histogram({
+  name: 'mnemosyne_reflect_scan_duration_seconds',
+  help: 'Wall time of one full reflect scan round',
+  buckets: [1, 5, 15, 60, 300, 900],
   registers: [registry],
 })
 

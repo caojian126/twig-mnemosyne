@@ -15,6 +15,7 @@
 import type { Db } from '../db.js'
 import type { TwigClaim } from '../memory/types.js'
 import type { TwigAdapter } from '../memory/TwigAdapter.js'
+import { errorsTotal } from '../observability/metrics.js'
 import cronParser from 'cron-parser'
 
 export interface RitualConfig {
@@ -86,8 +87,11 @@ export async function scanCandidate(
         }
       }
     }
-  } catch {
-    return null // twig 不可用 → 本轮放弃（不再消耗其他候选类型）
+  } catch (e) {
+    // twig 不可用 → 本轮放弃（不再消耗其他候选类型）；长期宕机不能只表现成「没有触达」
+    errorsTotal.inc({ error_type: 'outreach_candidates_twig', provider: 'twig' })
+    console.warn('[outreach] candidate scan skipped, twig unavailable:', e instanceof Error ? e.message : e)
+    return null
   }
 
   // 2. vein-nudge：dragonVein 降序 + daysOpen ≥3 + 7 天 thread 冷却（§19.3.6.3）
