@@ -24,18 +24,24 @@ import { runReflectScan } from './memory/reflectScan.js'
 function scheduleCron(expr: string, fn: () => Promise<void>, log: (m: string) => void): ReturnType<typeof setInterval> {
   let lastMinute = ''
   let running = false
+  let warnedInvalid = false
   const timer = setInterval(() => {
     const now = new Date()
     try {
       const prev = cronParser.parseExpression(expr, { currentDate: now }).prev().toDate()
+      warnedInvalid = false
       const hits = now.getTime() - prev.getTime() < 60_000 && prev <= now
       const minuteKey = now.toISOString().slice(0, 16)
       if (!hits || minuteKey === lastMinute || running) return
       lastMinute = minuteKey
       running = true
       fn().catch(e => log(`[scheduler] task failed: ${e instanceof Error ? e.message : String(e)}`)).finally(() => { running = false })
-    } catch {
-      // 非法 cron：不调度（配置校验应在部署前完成）
+    } catch (e) {
+      // 非法 cron：静默空转会让人以为调度正常在跑（配置错≠功能关）；一次性 error 可见
+      if (!warnedInvalid) {
+        warnedInvalid = true
+        log(`[scheduler] invalid cron expression "${expr}": ${e instanceof Error ? e.message : String(e)} — 调度已停摆`)
+      }
     }
   }, 30_000)
   return timer
@@ -46,6 +52,8 @@ async function main(): Promise<void> {
   if (applied.length > 0) console.log('[migrate] applied:', applied.join(', '))
 
   const redis = new Redis(env.REDIS_URL, { lazyConnect: false, maxRetriesPerRequest: 3 })
+  // ioredis 断连默认 emit error（无监听时走 console）——接结构化日志，Redis 故障可被日志巡检发现
+  redis.on('error', (e) => console.error(`[redis] error: ${e instanceof Error ? e.message : String(e)}`))
   const twig = new TwigAdapter(env.TWIG_URL, env.MUNINN_AUTH_TOKEN)
   const gateway = new ModelGateway(env.LITELLM_URL, env.LITELLM_API_KEY)
   const builder = new ContextBuilder(pool, twig)
@@ -81,6 +89,10 @@ async function main(): Promise<void> {
   }
 
   const app = Fastify({
+    // 反代可信跳数（Zeabur / Caddy）：不信任时 req.ip 恒为代理 IP，
+    // ip: 限流键退化成全体共享桶、登录尝试限流可被用来锁死他人。
+    // 本版 Fastify 类型不收数字跳数，用等价 trust 函数表达「信任前 N 跳」
+    trustProxy: (_addr: string, hop: number) => hop < env.TRUST_PROXY_HOPS,
     logger: {
       level: env.NODE_ENV === 'production' ? 'info' : 'debug',
       // §11.5：PII 管控在观测侧履行——请求体绝不整体入日志
@@ -135,7 +147,7 @@ async function main(): Promise<void> {
       setInterval(() => {
         if (outboxRunning) return
         outboxRunning = true
-        runOutboxWorker({ db: pool, twig, guard, cfg: huginn, log: m => app.log.info(m) })
+        runOutboxWorker({ db: pool, twig, ingestion, guard, cfg: huginn, log: m => app.log.info(m) })
           .catch(e => app.log.error(`[outbox] worker failed: ${e instanceof Error ? e.message : String(e)}`))
           .finally(() => { outboxRunning = false })
       }, huginn.outbox_worker_interval * 1000),

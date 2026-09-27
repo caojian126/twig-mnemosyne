@@ -48,6 +48,8 @@ const EnvSchema = z.object({
 
   // 管理面独立凭证（§12.4：admin endpoints require separate authentication）
   ADMIN_TOKEN: z.string().default(''),
+  // /metrics 抓取凭证（缺省公开——内网 Prometheus 直采；公网面收敛靠 Caddy 403 + 此 token 双保险）
+  METRICS_TOKEN: z.string().default(''),
 
   // §3.8 默认 fallback 链
   DEFAULT_MODEL_CHAIN: z.string().default('kimi-k2.6,gpt-4o,claude-sonnet,gemini-pro'),
@@ -55,6 +57,18 @@ const EnvSchema = z.object({
   // 单腿模型调用超时（原 120s 硬编码）：链式 fallback 最坏要排队吃满整条链的超时，
   // 收紧到 90s 并开放配置；推理型模型思考偏长可调大
   MODEL_TIMEOUT_MS: z.coerce.number().int().min(5_000).default(90_000),
+
+  // 反向代理可信跳数（Zeabur / Caddy 反代后 req.ip 才是真实客户端 IP；
+  // 0 = 不信任，直连暴露面部署用）。限流与尝试限流的 ip: 键都依赖它
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
+
+  // TTS 语音链（§21.3；云端优先链在 pipeline 装配，key 统一入 env 校验层）
+  ELEVENLABS_API_KEY: z.string().default(''),
+  ELEVENLABS_VOICE_ID: z.string().default(''),
+  SILICONFLOW_API_KEY: z.string().default(''),
+  OPENAI_API_KEY: z.string().default(''),
+  TTS_OPENAI_VOICE: z.string().default('alloy'),
+  TTS_SILICONFLOW_VOICE: z.string().default('FunAudioLLM/CosyVoice2-0.5B:alex'),
 
   // Moonshot 官方 API 密钥
   MOONSHOT_API_KEY: z.string().default(''),
@@ -84,6 +98,15 @@ function loadEnv(): Env {
   const key = Buffer.from(env.ENCRYPTION_KEY, 'base64')
   if (key.length !== 32) {
     throw new Error(`ENCRYPTION_KEY must decode to 32 bytes (got ${key.length}); generate with: openssl rand -base64 32`)
+  }
+  // 生产环境必须显式注入密钥类变量——默认值是公开的，忘配等于裸奔
+  if (env.NODE_ENV === 'production') {
+    if (env.CONFIRM_SECRET === 'insecure-dev-confirm-secret') {
+      throw new Error('CONFIRM_SECRET is still the insecure dev default; generate with: openssl rand -base64 32')
+    }
+    if (env.BROKER_INTERNAL_TOKEN === 'insecure-dev-broker-token') {
+      throw new Error('BROKER_INTERNAL_TOKEN is still the insecure dev default; generate with: openssl rand -base64 32')
+    }
   }
   return env
 }

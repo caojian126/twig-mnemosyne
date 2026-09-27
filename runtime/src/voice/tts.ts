@@ -6,6 +6,7 @@
  */
 import type { Redis } from 'ioredis'
 import { emotionScore } from './emotion.js'
+import { env } from '../config.js'
 
 export interface TtsDecisionContext {
   crisis: boolean
@@ -127,7 +128,7 @@ async function synthesizeOpenai(text: string, apiKey: string): Promise<{ mime: s
     body: JSON.stringify({
       model: 'tts-1-hd',
       input: text,
-      voice: process.env.TTS_OPENAI_VOICE || 'alloy',
+      voice: env.TTS_OPENAI_VOICE,
       response_format: 'mp3',
     }),
     signal: AbortSignal.timeout(30_000),
@@ -151,7 +152,7 @@ async function synthesizeSiliconflow(text: string, apiKey: string): Promise<{ mi
       model: 'FunAudioLLM/CosyVoice2-0.5B',
       input: text,
       // 渡鸦人格是男声：默认 alex；可选 benjamin/charles/david（女声 anna/bella/claire/diana）
-      voice: process.env.TTS_SILICONFLOW_VOICE || 'FunAudioLLM/CosyVoice2-0.5B:alex',
+      voice: env.TTS_SILICONFLOW_VOICE,
       response_format: 'mp3',
     }),
     signal: AbortSignal.timeout(30_000),
