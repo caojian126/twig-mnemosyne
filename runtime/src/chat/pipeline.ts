@@ -15,7 +15,7 @@ import { env, DEFAULT_CHAIN } from '../config.js'
 import { isCrisis } from '../crisis/lexicon.js'
 import { resolveSession, IdentityError, type UserRow, type ClientRow } from '../identity/service.js'
 import { ContextBuilder, type BuildContext, type BuiltContext, type OutgoingMessage } from '../context/builder.js'
-import { lookupModel, providerOf, clampTemperature } from '../context/modelRegistry.js'
+import { lookupModel, providerOf, clampTemperature, estimateCostUsd } from '../context/modelRegistry.js'
 import { ContextTooSmallError } from '../context/budget.js'
 import { buildCacheKey, narrativeVersionOf } from '../cache/keys.js'
 import { exactGet, exactSet } from '../cache/exact.js'
@@ -29,13 +29,13 @@ import type { MemoryIngestionPipeline } from '../memory/ingestion.js'
 import type { TwigAdapter } from '../memory/TwigAdapter.js'
 import type { ModelGateway } from '../gateways/litellm.js'
 import { toolsForLane, resolveTool, toOpenAiTools, summarizeArgs, enrichSchemas, mergeClientTools, type ClientToolEntry } from '../tools/resolver.js'
-import type { McpGatewayClient } from '../tools/executor.js'
+import type { McpGatewayClient, GatewayToolsPage } from '../tools/executor.js'
 import { contestedGate } from '../tools/contested.js'
 import { issueTicket, verifyTicket } from '../router/confirmation.js'
 import { estimateTokens } from '../util/tokens.js'
 import { Box } from '../util/crypto.js'
 import { shouldTTS, ttsSanitize, synthesizeTts, stashAudio } from '../voice/tts.js'
-import { cacheHitsTotal, errorsTotal, latencySeconds, requestsTotal, tokensTotal } from '../observability/metrics.js'
+import { cacheHitsTotal, costUsd, errorsTotal, latencySeconds, requestsTotal, tokensTotal } from '../observability/metrics.js'
 import { capThreadSection } from '../context/builder.js'
 
 export interface ChatDeps {
@@ -346,6 +346,8 @@ interface LoopState {
   nativeDropped?: number
   /** 工具回路统计（§5） */
   toolMeta?: { rounds: number; executed: number; pending: number }
+  /** 单请求内缓存的网关工具页：fallback 链每候选都进工具回路，不能各拉一次 listTools */
+  toolPage?: GatewayToolsPage
   /** 媒体附件（音乐 play 工具结果收集；TG sendAudio/web 卡片用） */
   attachments?: Attachment[]
 }
@@ -478,10 +480,15 @@ async function executeToolLoop(
   // §20：local lane 降级纯对话，不暴露工具 schema
   let laneTools = !spec || spec.lane === 'local' || st.privacyLane === 'local' ? [] : toolsForLane(st.lane)
   // §5.4：用网关真实 input_schema 喂模型；网关不可达时保留占位空 schema（调用端报 unknown-server，不静默）
-  try {
-    laneTools = enrichSchemas(laneTools, await deps.mcp.listTools(), st.lane)
-  } catch (e) {
-    console.error('[tools] mcp-gateway unreachable; schemas stay empty:', e instanceof Error ? e.message : e)
+  if (laneTools.length > 0 || st.clientTools.length > 0) {
+    if (!st.toolPage) {
+      try {
+        st.toolPage = await deps.mcp.listTools()
+      } catch (e) {
+        console.error('[tools] mcp-gateway unreachable; schemas stay empty:', e instanceof Error ? e.message : e)
+      }
+    }
+    if (st.toolPage) laneTools = enrichSchemas(laneTools, st.toolPage.tools, st.lane, st.toolPage.skillDocuments)
   }
   // 客户端工具合流（origin=client）：撞名时客户端显式声明压过注册表（被顶掉的网关工具本轮退场）
   const merged = mergeClientTools(laneTools, st.clientTools)
@@ -505,7 +512,6 @@ async function executeToolLoop(
   ]
   const currentMessage = st.currentMessage
   const cancelled = /取消/.test(currentMessage)
-  const pendingKey = `confirm:pending:${st.session.sessionId}`
   // 续轮：当前 user 行已在 DB 历史里（位于工具结果之前），不追加；新用户轮照常追加（§3.5）
   const convo: ChatMessage[] = [...built.messages, ...(st.continuation ? [] : [{ role: 'user' as const, content: currentMessage }])]
   const deadline = Date.now() + TOOL_LOOP_DEADLINE_MS
@@ -563,6 +569,8 @@ async function executeToolLoop(
 
         const contested = await contestedGate(deps.twig, req.user.eternal_id, rt.capability)
         const needConfirm = rt.confirmationRequired || contested
+        // 票槽按 fnName 分维度：会话级单槽会让同轮两个待确认工具互相覆盖票据
+        const pendingKey = `confirm:pending:${st.session.sessionId}:${rt.fnName}`
         const pendingRaw = needConfirm ? await deps.redis.get(pendingKey) : null
         let redeemed = false
         if (pendingRaw) {
@@ -590,9 +598,9 @@ async function executeToolLoop(
           resultText = await safeToolCall(deps, rt.server, rt.tool, args)
           // 音乐结果 → 附件收集（§5.5；仅 play 出结果集，search 只是候选列表）
           if (rt.capability === 'music' && resultText.includes('"music"')) {
-            const env = musicEnvelope(resultText)
-            if (env && rt.tool === 'play' && rt.server === 'music') {
-              st.attachments = env.songs.slice(0, 1)
+            const envelope = musicEnvelope(resultText)
+            if (envelope && rt.tool === 'play' && rt.server === 'music') {
+              st.attachments = envelope.songs.slice(0, 1)
             }
           }
         }
@@ -623,7 +631,46 @@ function isProviderMisconfig(e: unknown): boolean {
 }
 
 /** §3.8 每个候选独立装配（重装配），retryable/凭证缺失错误沿链降级；其余非 retryable 直接映射。 */
+/** 失败路径的 usage 记录（§9）：成功路径由 finalize 落行，失败此前从不落——
+ *  usage_logs.error 恒 false → admin/web 的 errors_total、provider error_rate 永远为 0。
+ *  记录失败不掩盖原错误；与成功行撞 request_id 时 ON CONFLICT DO NOTHING 幂等兜底。 */
+async function recordFailedUsage(deps: ChatDeps, req: ChatRequest, st: LoopState, e: unknown): Promise<void> {
+  try {
+    const firstModel = st.chain.find(m => lookupModel(m)) ?? 'unknown'
+    const errType = e instanceof IdentityError ? e.code : 'gateway_error'
+    const errMsg = e instanceof Error ? e.message : String(e)
+    await recordUsage(deps.db, {
+      requestId: st.requestId,
+      userId: req.user.id,
+      sessionId: st.session.sessionId,
+      clientType: st.clientType,
+      provider: providerOf(firstModel),
+      model: firstModel,
+      inputTokens: 0,
+      outputTokens: 0,
+      latencyMs: Date.now() - st.started,
+      routeReason: st.routeReason,
+      privacyTier: st.privacyLane,
+      error: true,
+      errorType: errType,
+      errorMessage: errMsg,
+    })
+    errorsTotal.inc({ error_type: errType, provider: providerOf(firstModel) })
+  } catch {
+    // 观测失败绝不二次破坏请求路径
+  }
+}
+
 async function runModelLoop(deps: ChatDeps, req: ChatRequest, st: LoopState, onDelta?: DeltaSink): Promise<ChatOutcome> {
+  try {
+    return await modelLoopInner(deps, req, st, onDelta)
+  } catch (e) {
+    await recordFailedUsage(deps, req, st, e)
+    throw e
+  }
+}
+
+async function modelLoopInner(deps: ChatDeps, req: ChatRequest, st: LoopState, onDelta?: DeltaSink): Promise<ChatOutcome> {
   let result: ChatResult | null = null
   let usedModel = ''
   let built = st.built
@@ -746,11 +793,11 @@ async function finalize(
       ttsChars = [...sanitized].length
       const synthesized = await synthesizeTts(sanitized, {
         elevenlabs: {
-          apiKey: process.env.ELEVENLABS_API_KEY || undefined,
-          voiceId: process.env.ELEVENLABS_VOICE_ID || undefined,
+          apiKey: env.ELEVENLABS_API_KEY || undefined,
+          voiceId: env.ELEVENLABS_VOICE_ID || undefined,
         },
-        siliconflow: { apiKey: process.env.SILICONFLOW_API_KEY || undefined },
-        openai: { apiKey: process.env.OPENAI_API_KEY || undefined },
+        siliconflow: { apiKey: env.SILICONFLOW_API_KEY || undefined },
+        openai: { apiKey: env.OPENAI_API_KEY || undefined },
       })
       if (synthesized) {
         const key = await stashAudio(deps.redis, st.requestId, synthesized)
@@ -762,6 +809,7 @@ async function finalize(
   // 对话持久化（§8.1）：用户消息已在管线入口落库；exact 命中同样落助手行（保持 DB 与用户实际经历一致）。
   // 回交轮（origin=client tool_calls）的助手行已由工具回路落库，这里跳过
   const assistantTokens = estimateTokens(st.content)
+  const costUsdEstimate = estimateCostUsd(st.usedModel, st.result?.promptTokens ?? 0, st.result?.completionTokens ?? assistantTokens)
   const assistantMessageId = st.assistantPersisted ? undefined : await (async () => {
     const { rows: asstRows } = await deps.db.query<{ id: string }>(
       `INSERT INTO conversation_messages (session_id, role, content, token_count, model_used, tokens_output, latency_ms, was_tts)
@@ -827,6 +875,7 @@ async function finalize(
     fallbackCount: st.fallbackCount,
     ttsChars,
     privacyTier: st.privacyLane,
+    costUsd: costUsdEstimate ?? undefined,
   })
 
   // 摄入（§3.6）：只灌用户原文；危机路径照常 ingest（twig 内部自动中止全部对照窗口）。
@@ -844,6 +893,8 @@ async function finalize(
   tokensTotal.inc({ type: 'output', provider }, st.result?.completionTokens ?? 0)
   if (st.cacheHitType !== 'miss') cacheHitsTotal.inc({ cache_type: st.cacheHitType })
   latencySeconds.observe({ stage: 'request_total', provider }, (Date.now() - st.started) / 1000)
+  // 成本计数器：此前从不 inc（恒 0）——价格表未登记的模型不计（成本未知 ≠ 0）
+  if (costUsdEstimate !== null) costUsd.inc({ provider, model: st.usedModel }, costUsdEstimate)
 
   return {
     status: 200,

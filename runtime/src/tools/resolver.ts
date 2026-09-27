@@ -41,6 +41,9 @@ export function toolsForLane(lane: string): RuntimeTool[] {
   return out
 }
 
+/** skill_document 注入提示词的封顶：这是使用说明不是全文转载，防大文档挤爆工具组预算 */
+const SKILL_DOC_CAP = 400
+
 /**
  * §5.4 schema 合并：网关 /tools 里是真实 input_schema，capabilities.yaml 只管确认要求与泳道过滤。
  * 匹配不到（server 挂了/未登记）保留占位空参数，调用时会报 unknown-server 错误——绝不静默。
@@ -48,13 +51,23 @@ export function toolsForLane(lane: string): RuntimeTool[] {
  * 2026-09-01 增补：把网关动态注册但 capabilities.yaml 未列出的工具也加进来（Smithery 等第三方 MCP）。
  * 2026-09-03 债务 #13 收口：动态工具只进 dynamic_tools.lanes 白名单泳道（lane 参数）；
  * 其他泳道经 registry.invoke 逃生舱仍可达（确认票兜底）。lane 缺省=不收敛（兼容旧调用与单测）。
+ * 2026-09-28：skill_documents（每 server 使用说明）追加进该 server 工具的 description。
  */
-export function enrichSchemas(tools: RuntimeTool[], gatewayTools: GatewayToolInfo[], lane?: string): RuntimeTool[] {
+export function enrichSchemas(
+  tools: RuntimeTool[],
+  gatewayTools: GatewayToolInfo[],
+  lane?: string,
+  skillDocuments?: Record<string, string>,
+): RuntimeTool[] {
   const byKey = new Map(gatewayTools.map(g => [`${g.server}/${g.name}`, g] as const))
+  const docFor = (server: string): string => {
+    const doc = skillDocuments?.[server]
+    return doc ? `\n\n〔用法〕${doc.slice(0, SKILL_DOC_CAP)}` : ''
+  }
   // 1. 补全已有工具的 schema（capability 声明的工具不受泳道白名单约束——已由 §10.2 管理）
   const enriched = tools.map(t => {
     const real = byKey.get(`${t.server}/${t.tool}`)
-    return real ? { ...t, parameters: real.input_schema ?? t.parameters } : t
+    return real ? { ...t, description: `${t.description}${docFor(t.server)}`, parameters: real.input_schema ?? t.parameters } : t
   })
   // 2. 把 gateway 中有但 capabilities 未列出的新工具加进来。
   //    键集与 fnName 集必须随追加实时更新：gateway 聚合层若返回重复条目，同一 function 名
@@ -77,7 +90,7 @@ export function enrichSchemas(tools: RuntimeTool[], gatewayTools: GatewayToolInf
       server: g.server,
       tool: g.name,
       capability: g.server,
-      description: g.description,
+      description: `${g.description}${docFor(g.server)}`,
       parameters: g.input_schema ?? { type: 'object', properties: {} },
       confirmationRequired: policy.confirmationRequired, // 第三方工具默认需要确认（安全方向）
     })

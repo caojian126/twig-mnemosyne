@@ -93,7 +93,7 @@ export async function getRecentMessages(
       `SELECT role, content, token_count, tool_calls, tool_results
          FROM conversation_messages
         WHERE session_id = $1 AND role IN ('user','assistant','tool') AND ($2::uuid IS NULL OR id <> $2)
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT $3 OFFSET $4`,
       [sessionId, excludeId ?? null, BATCH, offset],
     )

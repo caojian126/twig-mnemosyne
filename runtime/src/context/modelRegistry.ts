@@ -17,22 +17,26 @@ export interface ModelSpec {
    * 与 maxTemperature 的「≤1 收敛」区分：lock 时无论请求值一律返回 1。
    */
   temperatureLock?: boolean
-  /**
-   * 模型厂商内建能力（联网搜索等非 function 型 tool 条目）的透传开关。
+  /** 厂商内建能力（联网搜索等非 function 型 tool 条目）的透传开关。
    * 默认 false：客户端请求里的非 function 工具条目被丢弃。逐款确认 LiteLLM 对该模型
    * 的原生工具透传行为后，再在此显式开启——未经确认就放行等于把参数语义押在猜测上。
    */
   nativeToolsPassthrough?: boolean
+  /**
+   * 参考单价（USD / 1M tokens）——成本观测用，允许后续校准；不填 = 套餐内/未核实，成本记 null。
+   * 中转（commandcode/opencode）按套餐计费不按 token，故一律不填；local 模型边际成本 0。
+   */
+  pricePerMTokens?: { input: number; output: number }
 }
 
 export const MODEL_REGISTRY: Record<string, ModelSpec> = {
-  'gpt-4o': { contextWindow: 128000, maxOutput: 16384, lane: 'cloud', provider: 'openai' },
-  'claude-sonnet': { contextWindow: 200000, maxOutput: 8192, lane: 'cloud', provider: 'anthropic' },
-  'gemini-pro': { contextWindow: 1000000, maxOutput: 8192, lane: 'cloud', provider: 'gemini' },
+  'gpt-4o': { contextWindow: 128000, maxOutput: 16384, lane: 'cloud', provider: 'openai', pricePerMTokens: { input: 2.5, output: 10 } },
+  'claude-sonnet': { contextWindow: 200000, maxOutput: 8192, lane: 'cloud', provider: 'anthropic', pricePerMTokens: { input: 3, output: 15 } },
+  'gemini-pro': { contextWindow: 1000000, maxOutput: 8192, lane: 'cloud', provider: 'gemini', pricePerMTokens: { input: 1.25, output: 10 } },
   // litellm 侧两个别名 2026-09-01 起都指 deepseek-v4-flash-vision-exp（识图版）；窗口取保守值
-  'deepseek-flash': { contextWindow: 32000, maxOutput: 4096, lane: 'cloud', provider: 'deepseek' },
-  'deepseek-chat': { contextWindow: 65536, maxOutput: 8192, lane: 'cloud', provider: 'deepseek' },
-  'ollama/qwen3:8b': { contextWindow: 32768, maxOutput: 4096, lane: 'local', provider: 'ollama' },
+  'deepseek-flash': { contextWindow: 32000, maxOutput: 4096, lane: 'cloud', provider: 'deepseek', pricePerMTokens: { input: 0.27, output: 1.1 } },
+  'deepseek-chat': { contextWindow: 65536, maxOutput: 8192, lane: 'cloud', provider: 'deepseek', pricePerMTokens: { input: 0.27, output: 1.1 } },
+  'ollama/qwen3:8b': { contextWindow: 32768, maxOutput: 4096, lane: 'local', provider: 'ollama', pricePerMTokens: { input: 0, output: 0 } },
   // ── OpenAI 兼容中转（2026-08-30 接入；窗口在对照官方规格前取保守值，偏小只影响预算装配上限，安全方向）──
   // CommandCode 中转 · Gemini 3.7 Flash（套餐内，替代 3.1 Flash Lite/MODEL_NOT_IN_PLAN）
   'gemini-3.7-flash': { contextWindow: 1000000, maxOutput: 8192, lane: 'cloud', provider: 'commandcode' },
@@ -47,7 +51,7 @@ export const MODEL_REGISTRY: Record<string, ModelSpec> = {
   'kimi-k3': { contextWindow: 256000, maxOutput: 8192, lane: 'cloud', provider: 'moonshot', maxTemperature: 1, temperatureLock: true },
   'kimi-k2.7-code': { contextWindow: 256000, maxOutput: 8192, lane: 'cloud', provider: 'moonshot', maxTemperature: 1, temperatureLock: true },
   'kimi-k2.7-code-highspeed': { contextWindow: 262000, maxOutput: 8192, lane: 'cloud', provider: 'moonshot', maxTemperature: 1, temperatureLock: true },
-  'kimi-k2.6': { contextWindow: 256000, maxOutput: 8192, lane: 'cloud', provider: 'moonshot', maxTemperature: 1, temperatureLock: true },
+  'kimi-k2.6': { contextWindow: 256000, maxOutput: 8192, lane: 'cloud', provider: 'moonshot', maxTemperature: 1, temperatureLock: true, pricePerMTokens: { input: 0.6, output: 2.5 } },
   // ── CommandCode 中转（2026-09-01 批量接入，套餐内模型；名称与窗口经账号 /models + 实测核对，
   //    文档 v2026-08-26 已过时——GLM-5.3 系列文档漏了）──
   // Mnemosyne 别名 ≠ 上游名：litellm 侧逐字透传 CommandCode API 模型名（deploy/litellm/config.yaml）。
@@ -84,4 +88,11 @@ export function clampTemperature(temp: number, model: string): number {
   if (spec?.temperatureLock) return 1 // Moonshot 系：只接受 temperature=1，无论请求值
   const cap = spec?.maxTemperature
   return cap !== undefined ? Math.min(temp, cap) : temp
+}
+
+/** 估算单次调用成本（USD）：未登记价格的模型返回 null（成本未知 ≠ 0，别假装免费）。 */
+export function estimateCostUsd(model: string, inputTokens: number, outputTokens: number): number | null {
+  const price = MODEL_REGISTRY[model]?.pricePerMTokens
+  if (!price) return null
+  return (inputTokens / 1_000_000) * price.input + (outputTokens / 1_000_000) * price.output
 }

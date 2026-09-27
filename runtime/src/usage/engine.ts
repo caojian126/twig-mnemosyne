@@ -64,15 +64,3 @@ export async function recordUsage(db: Db, rec: UsageRecordInput): Promise<void> 
     ],
   )
 }
-
-/** §21.6 月度告警：Usage Engine 统计 tts_chars，阈值 8,000（留 2k 缓冲）。 */
-export async function ttsCharsThisMonth(db: Db, userId: string): Promise<number> {
-  const { rows } = await db.query<{ total: string | null }>(
-    `SELECT COALESCE(SUM(tts_chars), 0) AS total
-       FROM usage_logs
-      WHERE user_id = $1
-        AND timestamp >= date_trunc('month', NOW())`,
-    [userId],
-  )
-  return Number(rows[0]?.total ?? 0)
-}
