@@ -14,12 +14,28 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { BUILTIN_SERVERS, installBuiltin, type ToolInfo } from './builtin.js'
 
 const PORT = Number(process.env.PORT || 3000)
 const CONFIG_PATH = process.env.MCP_CONFIG_PATH || 'config.default.json'
+/**
+ * 内部共享密钥（与 Runtime 同源 env，恒时比较在长密钥下足够）：配置后 /register /unregister
+ * /call /tools 全部要求 X-Broker-Token——Zeabur 私有网内任何服务都能打到本网关，
+ * 无鉴权的 /register 等于把「注册 remote server（SSRF 跳板）+ 污染工具面」开给全网。
+ * 未配置（本地 dev）保持开放，但启动时告警一次，不留「为什么线上裸奔」的谜题。
+ */
+/** 惰性读取：测试可在运行时切换开关态；进程内不再缓存。 */
+function authToken(): string {
+  return process.env.BROKER_INTERNAL_TOKEN || ''
+}
+
+function checkAuth(req: IncomingMessage): boolean {
+  if (!authToken()) return true
+  return req.headers['x-broker-token'] === authToken()
+}
 
 interface ServerConfig {
   type: 'builtin' | 'local' | 'remote'
@@ -78,7 +94,10 @@ function loadSnapshot(): void {
 function loadConfig(): GatewayConfig {
   try {
     return JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) as GatewayConfig
-  } catch {
+  } catch (e) {
+    // 静默回退会让线上只剩「为什么我的 server 全没了」的谜题——原因必须可见
+    console.error(`[gateway] config load failed (${CONFIG_PATH}):`, e instanceof Error ? e.message : e,
+      '— falling back to builtin core only')
     return { mcpServers: { core: { type: 'builtin' } } }
   }
 }
@@ -97,7 +116,37 @@ const connecting = new Map<string, Promise<Conn>>()
 const toolsCache = new Map<string, { tools: ToolInfo[]; at: number }>()
 // 每 server 最近一次故障，/health 透出（listTools 失败不再只沉在日志里）
 const lastError = new Map<string, string>()
-const TOOLS_TTL_MS = 60_000
+const TOOLS_TTL_MS = Number(process.env.MCP_TOOLS_TTL_MS || 60_000)
+const CALL_TIMEOUT_MS = Number(process.env.MCP_CALL_TIMEOUT_MS || 60_000)
+
+// ── 调用指标（内存计数；/metrics Prometheus 文本）──────────────────────────
+// forge 页「今日调用 N · err M」此前无处可取——没有计量就没有可观测
+const callStats = new Map<string, { calls: number; errors: number; latencyMs: number }>()
+
+function recordCallStat(server: string, tool: string, latencyMs: number, failed: boolean): void {
+  const key = `${server}/${tool}`
+  const cur = callStats.get(key) ?? { calls: 0, errors: 0, latencyMs: 0 }
+  cur.calls++
+  if (failed) cur.errors++
+  cur.latencyMs += latencyMs
+  callStats.set(key, cur)
+}
+
+function renderPromMetrics(): string {
+  const lines: string[] = []
+  let total = 0, totalErr = 0
+  for (const [key, s] of callStats) {
+    const [server, tool] = key.split('/')
+    total += s.calls
+    totalErr += s.errors
+    lines.push(`mcp_gateway_tool_calls_total{server="${server}",tool="${tool}"} ${s.calls}`)
+    lines.push(`mcp_gateway_tool_errors_total{server="${server}",tool="${tool}"} ${s.errors}`)
+    lines.push(`mcp_gateway_tool_latency_ms_sum{server="${server}",tool="${tool}"} ${s.latencyMs}`)
+  }
+  lines.push(`mcp_gateway_tool_calls_total{server="_all",tool="_all"} ${total}`)
+  lines.push(`mcp_gateway_tool_errors_total{server="_all",tool="_all"} ${totalErr}`)
+  return `# TYPE mcp_gateway_tool_calls_total counter\n# TYPE mcp_gateway_tool_errors_total counter\n# TYPE mcp_gateway_tool_latency_ms_sum counter\n${lines.join('\n')}\n`
+}
 
 function serverConfig(name: string): ServerConfig | undefined {
   return config.mcpServers[name] ?? dynamicServers.get(name)
@@ -184,8 +233,6 @@ async function checkHealth(): Promise<void> {
     }
   }
 }
-
-setInterval(() => { checkHealth().catch(() => undefined) }, 30_000).unref()
 
 // ── 动态注册（pi-mcp 借鉴：URL 必须显式给出）────────────────────────────────
 
@@ -339,30 +386,75 @@ async function listToolsFor(server: string): Promise<ToolInfo[]> {
   return tools
 }
 
+/** skill_document 解析（「透传」承诺的收口）：像文件路径且存在 → 读内容；否则按内联文本。 */
+function resolveSkillDocument(server: string): string | undefined {
+  const cfg = serverConfig(server)
+  if (!cfg?.skill_document) return undefined
+  const doc = cfg.skill_document
+  if (!/\.(md|markdown|txt)$/i.test(doc) && !doc.includes('/')) return doc // 内联文本
+  try {
+    if (existsSync(doc)) return readFileSync(doc, 'utf8')
+  } catch { /* 读不到按不存在处理 */ }
+  return undefined
+}
+
+/** 每 server 的 skill_document（/tools 以兄弟字段透出，避免逐工具重复大段文本）。 */
+async function allSkillDocuments(): Promise<Record<string, string>> {
+  const names = [...Object.keys(config.mcpServers), ...dynamicServers.keys()]
+  const out: Record<string, string> = {}
+  for (const name of names) {
+    const doc = resolveSkillDocument(name)
+    if (doc) out[name] = doc.slice(0, 8000)
+  }
+  return out
+}
+
 async function allTools(): Promise<ToolInfo[]> {
   // server 聚合必须按名去重：static 配置显式声明的 builtin 与 BUILTIN_SERVERS 重叠，
   // 各聚合一次会让同一工具在 /tools 出现两遍（2026-09-01 重复 function 名事故的源头）
   const staticNames = Object.entries(config.mcpServers).filter(([, c]) => c.enabled !== false).map(([n]) => n)
   const dynamicNames = [...dynamicServers.keys()]
   const names = [...staticNames, ...dynamicNames, ...Object.keys(BUILTIN_SERVERS).filter(n => !staticNames.includes(n) && !dynamicNames.includes(n))]
+  // 并行聚合：串行 await 会让冷启动 /tools 延迟 = 各 server 之和（远端 server 慢时尤其痛）
+  const settled = await Promise.allSettled(names.map(name => listToolsFor(name)))
   const out: ToolInfo[] = []
-  for (const server of names) {
-    try {
-      out.push(...(await listToolsFor(server)))
-      lastError.delete(server)
-    } catch (e) {
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i] ?? ''
+    const r = settled[i]
+    if (r && r.status === 'fulfilled') {
+      out.push(...r.value)
+      lastError.delete(name)
+    } else if (r) {
       // 单个 server 故障不拖垮聚合（懒连接失败即跳过，下次再试）；故障原因透到 /health
-      lastError.set(server, e instanceof Error ? e.message : String(e))
-      console.error(`[gateway] listTools ${server} failed:`, e instanceof Error ? e.message : e)
+      const reason = r.status === 'rejected' ? r.reason : 'unknown'
+      lastError.set(name, reason instanceof Error ? reason.message : String(reason))
+      console.error(`[gateway] listTools ${name} failed:`, reason instanceof Error ? reason.message : reason)
     }
   }
   return out
 }
 
 async function callTool(server: string, tool: string, args: Record<string, unknown>): Promise<string> {
+  const t0 = Date.now()
+  let failed = false
+  try {
+    return await callToolInner(server, tool, args)
+  } catch (e) {
+    failed = true
+    throw e
+  } finally {
+    recordCallStat(server, tool, Date.now() - t0, failed)
+  }
+}
+
+async function callToolInner(server: string, tool: string, args: Record<string, unknown>): Promise<string> {
   if (isBuiltin(server)) return await BUILTIN_SERVERS[server].call(tool, args)
   const conn = await getConnection(server)
-  const res = await conn.client.callTool({ name: tool, arguments: args })
+  // SDK 默认超时之外的显式上限：挂死的远端 server 不该把工具轮拖到 deadline 才被发现
+  const res = await Promise.race([
+    conn.client.callTool({ name: tool, arguments: args }),
+    new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`call timeout after ${CALL_TIMEOUT_MS}ms`)), CALL_TIMEOUT_MS)),
+  ])
   if (res.isError) {
     const text = Array.isArray(res.content)
       ? res.content.map((c: { text?: string }) => c.text ?? '').join('\n')
@@ -396,12 +488,20 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return raw
 }
 
-const server = createServer(async (req, res) => {
+async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
   try {
     if (req.method === 'GET' && url.pathname === '/health') {
       // 每 server 状态透出：Runtime 可以判断某项能力实际是活的还是死的
       return json(res, 200, { ok: true, servers: await allServers(false) })
+    }
+    if (req.method === 'GET' && url.pathname === '/metrics') {
+      return json(res, 200, { ok: true, metrics: renderPromMetrics() })
+    }
+    // 鉴权面（/health /metrics 只读放行）：配置了共享密钥后，注册/注销/调用/工具列表都要票
+    if (!checkAuth(req)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      return void res.end(JSON.stringify({ error: 'forbidden (x-broker-token required)' }))
     }
     if (req.method === 'POST' && url.pathname === '/register') {
       const body = JSON.parse((await readBody(req)) || '{}') as { name?: string; url?: string; skill_document?: string; headers?: Record<string, string> }
@@ -417,7 +517,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true })
     }
     if (req.method === 'GET' && url.pathname === '/tools') {
-      return json(res, 200, { tools: await allTools() })
+      return json(res, 200, { tools: await allTools(), skill_documents: await allSkillDocuments() })
     }
     if (req.method === 'POST' && url.pathname === '/call') {
       const body = JSON.parse((await readBody(req)) || '{}') as { server?: string; tool?: string; args?: Record<string, unknown> }
@@ -430,11 +530,11 @@ const server = createServer(async (req, res) => {
     const msg = e instanceof Error ? e.message : 'gateway error'
     json(res, msg === 'payload too large' ? 413 : 502, { error: msg.slice(0, 400) })
   }
-})
+}
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mcp-gateway] listening on :${PORT}; servers: ${Object.keys(config.mcpServers).join(', ')}`)
-})
+export function createGatewayServer(): Server {
+  return createServer((req, res) => { void handleRequest(req, res) })
+}
 
 // ── 环境变量预注册（动态注册的持久化路径）─────────────────────────────────────
 /**
@@ -463,6 +563,29 @@ async function bootRegistrations(): Promise<void> {
   }
 }
 
-// 启动顺序：快照读回（known-unverified）→ env 预注册（运维当前意图，优先级更高）→ 懒握手
-loadSnapshot()
-void bootRegistrations()
+// 启动顺序：快照读回（known-unverified）→ env 预注册（运维当前意图，优先级更高）→ 懒握手。
+// 仅直跑入口时执行——被测试 import 时不起服务、不碰快照文件、不启动巡检
+const isMain = process.argv[1] ? import.meta.url === pathToFileURL(process.argv[1]).href : false
+if (isMain) {
+  const server = createGatewayServer()
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[mcp-gateway] listening on :${PORT}; servers: ${Object.keys(config.mcpServers).join(', ')}` +
+      (authToken() ? '' : ' (无 BROKER_INTERNAL_TOKEN——端点鉴权关闭，仅限本地 dev)'))
+  })
+  // 辅线程巡检：失败连接丢弃（下次 use 懒重建）
+  setInterval(() => { checkHealth().catch(() => undefined) }, 30_000).unref()
+  // 优雅停机：快照是 write-through 不怕丢，但在途调用与 stdio 子进程要收干净
+  const shutdown = async (signal: string): Promise<void> => {
+    console.log(`[mcp-gateway] ${signal} received, shutting down`)
+    server.close()
+    for (const [name, conn] of conns) {
+      await conn.client.close().catch(() => undefined)
+      conns.delete(name)
+    }
+    process.exit(0)
+  }
+  process.on('SIGINT', () => void shutdown('SIGINT'))
+  process.on('SIGTERM', () => void shutdown('SIGTERM'))
+  loadSnapshot()
+  void bootRegistrations()
+}
