@@ -263,70 +263,45 @@
           <button class="btn" style="padding:7px 14px;font-size:12px;" id="btnNewClient">+ 签发新客户端</button>
         </div>
         <table class="tbl mt8">
-          <thead><tr><th>名称</th><th>client_key</th><th>scopes</th><th>voice</th><th>webhook</th><th>状态</th><th></th></tr></thead>
-          <tbody>
-            <tr>
-              <td>web · 浏览器</td><td class="mono">ck_7f2a…</td><td class="mono">chat</td>
-              <td><span class="badge b-ghost">no</span></td>
-              <td class="mono dim">—</td>
-              <td><span class="badge b-ok">active</span></td>
-              <td style="white-space:nowrap;"><button class="btn btn-ghost" style="padding:5px 10px;font-size:11px;">轮换 key</button></td>
-            </tr>
-            <tr>
-              <td>ios · 快捷指令</td><td class="mono">ck_b91e…</td><td class="mono">chat</td>
-              <td><span class="badge b-info">voice_capable</span></td>
-              <td class="mono">https://hook.example.com/wh/8x2…</td>
-              <td><span class="badge b-ok">active</span></td>
-              <td style="white-space:nowrap;"><button class="btn btn-ghost" style="padding:5px 10px;font-size:11px;">轮换 key</button></td>
-            </tr>
-            <tr>
-              <td>provisioner · 一次性</td><td class="mono">ck_04cd…</td><td class="mono">provision</td>
-              <td><span class="badge b-ghost">no</span></td>
-              <td class="mono dim">—</td>
-              <td><span class="badge b-warn">dormant</span></td>
-              <td style="white-space:nowrap;"><button class="btn btn-terra" style="padding:5px 10px;font-size:11px;">吊销</button></td>
-            </tr>
+          <thead><tr><th>类型</th><th>名称</th><th>webhook</th><th>状态</th><th style="text-align:right;">操作</th></tr></thead>
+          <tbody id="clientRows">
+            <tr><td colspan="5" class="stat-sub">加载中…</td></tr>
           </tbody>
         </table>
         <div class="stat-sub mt8">client_key 明文只在签发时出现一次；轮换即时生效，旧 key 立即作废（T1.5 尝试限流保护）。</div>
 
         <div id="newClientPanel" class="hidden mt14">
           <div class="grid g-3" style="gap:12px;">
-            <div class="field"><label>名称</label><input placeholder="cli · 终端"></div>
-            <div class="field"><label>scopes</label><select><option>chat</option><option>provision</option></select></div>
-            <div class="field"><label>webhook_url（可选）</label><input placeholder="https://… · 投递前过 SSRF 校验链"></div>
-          </div>
-          <div class="mt8">
-            <label class="switch">
-              <input type="checkbox">
-              <span class="track"></span>
-              <span class="sw-label">voice_capable · 写入 clients.metadata</span>
-            </label>
+            <div class="field"><label>类型 · 每类型一张牌（重复签发会被 409 拒绝）</label>
+              <select id="newClientType">
+                <option value="api">api · 通用脚本</option>
+                <option value="operit">operit</option>
+                <option value="rikkahub">rikkahub</option>
+                <option value="mobile">mobile</option>
+                <option value="telegram">telegram（含 webhook 出站）</option>
+              </select>
+            </div>
+            <div class="field"><label>名称（可选）</label><input id="newClientName" placeholder="cli · 终端"></div>
           </div>
           <div style="display:flex;gap:10px;justify-content:flex-end;" class="mt14">
             <button class="btn btn-terra" id="btnCancelClient">取消</button>
             <button class="btn" id="btnIssue">签发（明文只显示一次）</button>
           </div>
         </div>
+        <div id="issuedKeyPanel" class="hidden mt14" style="background:var(--olive-soft, rgba(138,154,91,.12));border:1px solid var(--olive);border-radius:6px;padding:12px 14px;">
+          <b style="font:600 13px var(--f-serif);color:var(--ink)">明文只出现这一次——现在复制，关掉就没有了</b>
+          <div class="mono mt8" id="issuedKeyValue" style="font-size:13px;word-break:break-all;color:var(--ink);"></div>
+        </div>
       </div>
     </div>
 
     <div class="footer">
-      <span>ΡΥΘΜΙΣΕΙΣ · 静态稿（数据未接入，开关为交互演示）</span>
+      <span>ΡΥΘΜΙΣΕΙΣ · 客户端册实时（/v1/web/clients）；其余偏好区为设计稿，待偏好读写端点</span>
       <span>调律一次，受益每日。</span>
     </div>
   </main>
 </div>
 
-<script>
-  const $ = id => document.getElementById(id);
-  $('crisisLocal').addEventListener('change', e => {
-    $('crisisLocalWarn').classList.toggle('hidden', !e.target.checked);
-  });
-  $('btnNewClient').addEventListener('click', () => $('newClientPanel').classList.remove('hidden'));
-  $('btnCancelClient').addEventListener('click', () => $('newClientPanel').classList.add('hidden'));
-  $('btnIssue').addEventListener('click', () => $('newClientPanel').classList.add('hidden'));
-</script>
 <script type="module" src="/src/boot.js"></script>
 </body>
 </html>

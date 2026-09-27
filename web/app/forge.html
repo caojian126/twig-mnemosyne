@@ -128,30 +128,22 @@
     <div class="sec">
       <div class="sec-head">
         <div class="sec-title"><div class="gk">ΔΙΑΥΛΟΣ</div><div class="cn">MCP 网关与外部资源</div></div>
-        <div class="sec-note">§5 · lazy loading / 动态注册 / skill documents / broker 取件 —— eznix86 fork 待放置构建上下文</div>
+        <div class="sec-note">§5 · lazy loading / 动态注册 / skill documents——网关为本仓库自有实现（mcp-gateway/，/v1/web/mcp/health 实时）</div>
       </div>
       <div class="meander slim"></div>
 
-      <div class="grid g-3">
+      <div class="grid g-3" id="mcp-cards">
+        <div class="card card-pad"><div class="stat-sub">加载网关状态…</div></div>
+        <div class="card card-pad"><div class="stat-sub">加载网关状态…</div></div>
         <div class="card card-pad">
           <div style="display:flex;justify-content:space-between;align-items:center;">
-            <b style="font:600 13px var(--f-serif);color:var(--ink)">netease_mcp</b>
-            <span class="badge b-ok">connected</span>
+            <b style="font:600 13px var(--f-serif);color:var(--ink)">Token Broker 取件</b>
+            <span class="badge b-ghost">armed · idle</span>
           </div>
-          <div class="kv mt8"><span class="k">来源</span><span class="v">本地 · stdio</span></div>
-          <div class="kv"><span class="k">暴露能力</span><span class="v">music</span></div>
-          <div class="kv"><span class="k">lazy loading</span><span class="v">首次调用拉起</span></div>
-          <div class="kv"><span class="k">今日调用</span><span class="v">17 · err 0</span></div>
-        </div>
-        <div class="card card-pad">
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <b style="font:600 13px var(--f-serif);color:var(--ink)">smithery.ai registry</b>
-            <span class="badge b-warn">discover only</span>
-          </div>
-          <div class="kv mt8"><span class="k">来源</span><span class="v">远程 · §16 结构化 API</span></div>
-          <div class="kv"><span class="k">策略</span><span class="v">不抓取 · 走官方 API</span></div>
-          <div class="kv"><span class="k">已注册 server</span><span class="v">1</span></div>
-          <div class="kv"><span class="k">候选队列</span><span class="v">4 待审批</span></div>
+          <div class="kv mt8"><span class="k">模式</span><span class="v">§5.3 · 内部短票</span></div>
+          <div class="kv"><span class="k">存储</span><span class="v">AES-256 · Postgres</span></div>
+          <div class="kv"><span class="k">审计</span><span class="v">每次取件落账</span></div>
+          <div class="kv"><span class="k">状态</span><span class="v">oauth_tokens 暂无写入方——首个 OAuth 型 MCP server 接入时启用</span></div>
         </div>
         <div class="card card-pad">
           <div style="display:flex;justify-content:space-between;align-items:center;">

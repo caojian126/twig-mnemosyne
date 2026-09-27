@@ -44,7 +44,7 @@ export function mountRail() {
           <div class="sub"><a href="#" id="rail-logout" style="color:inherit;text-decoration:none;border-bottom:1px dotted var(--aegean-deep);">退出登录</a></div>
         </div>
       </div>
-      <div class="rail-ver">v0.3.1 · twig @89a7881</div>
+      <div class="rail-ver">v' + (typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev") + ' · twig @00c1aca</div>
     </div>`
   document.getElementById('rail-logout')?.addEventListener('click', e => {
     e.preventDefault()

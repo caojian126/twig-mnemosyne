@@ -222,4 +222,54 @@ document.getElementById('chat-clear').addEventListener('click', () => {
 
 renderOps()
 renderModelOptions()
+loadHuginnPanel()
 input.focus()
+
+
+/* ── ΗΓΓΝ 出站面板（近 7 天状态计数 + 最近触达记录；§19 状态机可视化） ── */
+const huginnStatus = document.getElementById('ops-huginn-status')
+const huginnLog = document.getElementById('ops-huginn-log')
+
+const STATUS_ZH = {
+  delivered: '已投递', completed: '完成', intervention_pending: '干预待上报',
+  delivery_pending: '待重投', generated: '文案已生成', reserved: '已占槽',
+  filtered: '被策略过滤', failed: '失败',
+}
+
+function renderHuginnLog(rows) {
+  if (!huginnLog) return
+  if (!rows.length) {
+    huginnLog.innerHTML = '<div class="stat-sub">近 7 天没有触达记录——渡鸦也在等合适的时机。</div>'
+    return
+  }
+  huginnLog.innerHTML = rows.map(r => {
+    const ok = r.status === 'delivered' || r.status === 'completed' || r.status === 'intervention_pending'
+    const color = ok ? 'var(--olive)' : r.status === 'failed' ? 'var(--terra)' : 'var(--gold)'
+    const when = (r.delivered_at || r.created_at || '').slice(5, 16).replace('T', ' ')
+    const extra = r.filter_reason ? ` · ${r.filter_reason}` : r.last_delivery_error ? ` · ${r.last_delivery_error.slice(0, 60)}` : ''
+    return `<div class="stat-sub" style="color:var(--ink-2)">
+      <span style="color:${color}">●</span> ${when} · ${STATUS_ZH[r.status] ?? r.status}
+      ${r.outreach_type ? `· ${r.outreach_type}` : ''}${r.slot_number != null ? ` · slot ${r.slot_number}` : ''}${extra}
+    </div>`
+  }).join('')
+}
+
+async function loadHuginnPanel() {
+  try {
+    const [summary, log] = await Promise.all([
+      api('/v1/web/outreach/summary'),
+      api('/v1/web/outreach/log?limit=12'),
+    ])
+    if (huginnStatus) {
+      const cfg = summary.config ?? {}
+      const counts = Object.entries(summary.status_counts_7d ?? {})
+        .map(([k, v]) => `${STATUS_ZH[k] ?? k} ${v}`)
+        .join(' · ') || '无记录'
+      huginnStatus.textContent = `${cfg.enabled ? '启用' : '已停'} · cap ${cfg.daily_cap ?? '—'} · ${counts}`
+    }
+    renderHuginnLog(log.rows ?? [])
+  } catch (e) {
+    if (huginnStatus) huginnStatus.textContent = `触达面板不可用：${e.message}`
+    if (huginnLog) huginnLog.innerHTML = ''
+  }
+}

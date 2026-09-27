@@ -9,6 +9,9 @@ const PAGE_MODULES = {
   book: () => import('./pages/book.js'),
   explorer: () => import('./pages/explorer.js'),
   console: () => import('./pages/console.js'),
+  observatory: () => import('./pages/observatory.js'),
+  forge: () => import('./pages/forge.js'),
+  settings: () => import('./pages/settings.js'),
   login: () => import('./pages/login.js'),
 }
 

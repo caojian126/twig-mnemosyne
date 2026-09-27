@@ -32,6 +32,8 @@ export async function api(path, opts = {}) {
     method: opts.method ?? 'GET',
     headers: { 'Content-Type': 'application/json', 'X-Client-Key': token },
     body: opts.body != null ? JSON.stringify(opts.body) : undefined,
+    // 后端挂起时页面不该永远转圈（默认 20s；流式路径走 console.js 自管）
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
   })
   if (res.status === 401) {
     logout()

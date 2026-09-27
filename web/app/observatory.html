@@ -31,24 +31,24 @@
     <!-- 水位 -->
     <div class="grid g-4" style="margin-top:0;">
       <div class="card card-pad">
-        <div class="stat-label">活跃泳道 · 1h</div>
-        <div class="stat-value">2 <small>/ 4</small></div>
-        <div class="stat-sub">chat · research 在游</div>
+        <div class="stat-label">请求 · 24h</div>
+        <div class="stat-value" id="obs-requests">—</div>
+        <div class="stat-sub">错误 <span id="obs-errors">—</span> · 平均延迟 <span id="obs-latency">—</span></div>
       </div>
       <div class="card card-pad">
-        <div class="stat-label">今日分类 · intent</div>
-        <div class="stat-value">137</div>
-        <div class="stat-sub">chat 62% · tool 21% · research 12% · coding 5%</div>
+        <div class="stat-label">自建缓存命中 · 24h</div>
+        <div class="stat-value" id="obs-cache-rate">—</div>
+        <div class="stat-sub">exact + context 命中占比</div>
       </div>
       <div class="card card-pad">
-        <div class="stat-label">平均置信度</div>
-        <div class="stat-value">0.88</div>
-        <div class="stat-sub">低于 0.6 转 tool 兜底泳道 · 今日 2 次</div>
+        <div class="stat-label">tokens · 24h</div>
+        <div class="stat-value" id="obs-tokens">—</div>
+        <div class="stat-sub">自建节省 <span id="obs-cache-saved">—</span></div>
       </div>
       <div class="card card-pad">
-        <div class="stat-label">检查点 · checkpoints</div>
-        <div class="stat-value">46</div>
-        <div class="stat-sub">全部验签通过 · 0 拒绝恢复</div>
+        <div class="stat-label">成本估算 · 24h</div>
+        <div class="stat-value" id="obs-cost">—</div>
+        <div class="stat-sub">按注册表参考价；套餐内模型不计</div>
       </div>
     </div>
 
@@ -190,7 +190,7 @@
     </div>
 
     <div class="footer">
-      <span>ΑΣΤΡΟΝΟΜΕΙΟΝ · 静态稿（数据未接入，规划见 docs）</span>
+      <span>ΑΣΤΡΟΝΟΜΕΙΟΝ · 水位卡接 24h 真实用量；分岔图与检查点表为 LangGraph 规划示意</span>
       <span>意图被分类，痕迹被签名。</span>
     </div>
   </main>
