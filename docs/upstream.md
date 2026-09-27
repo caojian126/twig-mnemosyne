@@ -1,7 +1,7 @@
 # 上游契约对齐与施工偏差
 
 宿主（本仓库）按 `Mnemosyne_Technical_Implementation_Document_v0.3.0_complete.md` +
-`v0.3.1_patch.md` 施工，上游契约锚定 [qimingjiu/twig-memory](https://github.com/qimingjiu/twig-memory)（muninn）@ `89a7881`。
+`v0.3.1_patch.md` 施工，上游契约锚定 [qimingjiu/twig-memory](https://github.com/qimingjiu/twig-memory)（muninn）@ `00c1aca`（2026-09-28 副本刷新，此前锚 @89a7881）。
 本文记录实测对齐结果、对补丁的两处施工修正，以及上游配合事项（§0.4 R1–R5）的状态。
 
 ## 对 v0.3.1 补丁的两处施工修正
@@ -20,11 +20,14 @@
 - 宿主侧新增 **remention 7 天投递冷却**（`scanCandidate`）：dedupe_key 的 5 分钟桶只防同刻重放，防不了下一轮 cron 对同一 pending 邀请的重复兑现（§19.6 防纠缠）。
 - `GET /health` 返回 `{ok, llm, embed, auth}`；ingest 收 `{userId, text, title?, tags?[]}` 且强制 4000 字符上限；上游自带 per-user 限速（429）。
 - `threads` 仍无 `last_user_evidence_at` / `last_huginn_outreach_at` 字段 → vein-nudge 独立证据检测维持「7 天硬冷却 + evidenceLevel 降级」近似（R 请求仍有效）。
-- R1（`/v1/crisis-check`）上游尚未实现 → 危机词表继续 vendor 自 core.ts @89a7881。
+- R1（`/v1/crisis-check`）上游尚未实现 → 危机词表继续 vendor（@00c1aca 实测词表未变）。
 
 ## 上游配合事项（§0.4 R1–R5 状态）
 
-- ✅ **已落地（muninn 本地工作区）**：intervene 的 `outcome`/`evidenceLevel` 字段；`user_engaged → REDEEMED` 消费；`post_intervention` 碎片在 reflect 中权重降级（core.ts `evidenceLevel === 'post_intervention'` 过滤）。
+- ✅ **已落地（上游已推送，@00c1aca 可查）**：intervene 的 `outcome`/`evidenceLevel` 字段（`noteIntervention` 签名扩展，旧请求体不传时行为不变）；`user_engaged → REDEEMED` 消费（且 redeemed 邀请不再注入 promptText）；post-intervention 窗口（触达前 24h ~ 后 48h）碎片在 reflect 认识层自动打「权重降级」sourceTag。
+- ✅ **reflect async=1 已推送**：202 {queued:true} 后台执行——宿主反刍排程（reflectScan）依赖该语义，此前上游仅在本地工作区先行。
+- ✅ **上游 host-loop 缓存策略与宿主 R0–R4 收敛**：叙事包从 system prompt 末尾挪到本轮 user 消息头部、system 只留稳定人设——宿主 0903 批次（stable→volatile 装配）先行对齐，口径一致。
+- 副本刷新说明：上游新增 aml / bench-cache / xuan（临水轩前端）/ eval 模块与 `sharp` 等 dev 依赖；宿主副本按 README「外部构建上下文」政策仍只取 server（剔 eval-data）/ shared / visualizer/engine + 包文件，Dockerfile 保留宿主定制（`MUNINN_ENTRY` 可覆写）。CRISIS_LEXICON 本批次未变，vendor 词表继续有效。
 - ⏳ R1 `/v1/crisis-check`：未落地，宿主词表继续 vendor（锁定 @89a7881）。
 - ⏳ R5 ingest 长度上限：上游仍强制 4000 字符，宿主保留切片过渡。
 - ⏳ 证据时间戳（thread.last_user_evidence_at 等）：未提供，vein-nudge 独立证据公式维持近似。

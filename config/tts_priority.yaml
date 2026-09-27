@@ -1,4 +1,8 @@
 # tts_priority.yaml — §21.3（E-6 勘误后：云端优先，MIT 本地备选封存 D-12）
+# ⚠️ 本文件是【决策记录】不是运行时配置：宿主目前没有 tts_priority 加载器，
+# 实际云端优先链硬编码在 runtime/src/chat/pipeline.ts（elevenlabs → siliconflow → openai）。
+# 本表的 google / fish_audio 条目尚无代码路径；budget 段（月度字符告警）未实现。
+# 引入加载器或改链时先改 pipeline，再回来同步这张表。
 priority_chain:
   # 第一梯队：质量优先（云端 API）
   - provider: elevenlabs

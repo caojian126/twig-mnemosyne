@@ -1,0 +1,39 @@
+# 告警规则（monitoring profile 最小集）：出事前知道，而不是事后翻日志。
+groups:
+  - name: mnemosyne-core
+    rules:
+      - alert: MnemosyneInstanceDown
+        expr: up{job="mnemosyne-runtime"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "mnemosyne runtime 抓取失败 ≥2 分钟"
+          description: "Prometheus 连不上 mnemosyne:8000 的 /metrics——容器退出、健康检查失败或网络断。"
+
+      - alert: MnemosyneHighErrorRate
+        expr: sum(rate(mnemosyne_errors_total[10m])) / clamp_min(sum(rate(mnemosyne_requests_total[10m])), 0.001) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "chat 错误率 >20%（10m 窗口）"
+          description: "all_providers_down / privacy_unavailable / gateway_error 类失败占比过高——查 litellm 与上游凭证。"
+
+      - alert: MnemosyneAllProvidersDown
+        expr: increase(mnemosyne_errors_total{error_type="all_providers_down"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "fallback 链耗尽（all_providers_down）"
+          description: "整条模型链在 5 分钟内至少失败一次——上游凭证或网络问题。"
+
+      - alert: MnemosyneReflectStalled
+        expr: increase(mnemosyne_reflect_total{outcome="failed"}[24h]) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "反刍扫描连续失败"
+          description: "24h 内 reflect 点火失败超过 3 次——twig 不可达或超时过紧。"

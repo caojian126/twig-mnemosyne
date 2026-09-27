@@ -1,6 +1,6 @@
 # 实现状态与模块对照
 
-状态截至 2026-09-04（**v1.0.0 已封印**，tag 挂 `a7b149de`；v0.3.1 基线 + 0903 修订批次：缓存命中面 R0–R4、真流式 #5、DNS 钉扎 #6、
+状态截至 2026-09-28（v1.0.0 → **v1.1.0**；此前基线 v1.0.0，tag 挂 `a7b149de`；v0.3.1 基线 + 0903 修订批次：缓存命中面 R0–R4、真流式 #5、DNS 钉扎 #6、
 动态工具泳道 #13、本地备份、console 对话面、记忆写操作；测试 137/137）。
 **0903 发布前全仓审查批次**（推正式版前 bug 清剿，测试 146/146）：
 主管线（缓存 try 圈收窄防失败重跑重复输出；当前用户消息经 excludeMessageId 排除、不再重复进装配；
@@ -20,9 +20,10 @@ dedupe_key 幂等复用，超限 failed/delivery_exhausted）；registry.invoke 
 JWT_SECRET；generateOutreach 补 clampTemperature（kimi 温度锁不再断生成链第三棒）；TG 危机消息
 全链失败补发静态危机资源兜底、重启跳过积压回放（offset=-1 起步）；inQuietHours 的 ICU「24:00」
 午夜怪癖归零；mcp-gateway readBody 加 1MB 上限；限流 Redis 键对 clientKey 哈希（明文凭证不入键名）。
-记档未改：resolveSession by-ID 不看 is_active（无写入方，休眠字段）；feed/metrics 的
-intervention_pending 死过滤（无害）；TG 轮询串行（60s 工具回路会堵后续消息）；chatStream 120s
-是总超时非空闲超时；/metrics 公开（公网暴露面建议在 caddy 侧收敛）。
+早期记档项的归宿（0928 批次）：TG 轮询串行 ✅ 已并发化；/metrics 公开 ✅ 已双层收敛；
+is_active 无写入方 ✅ client 管理 BFF 落地后有写入方（轮换/吊销/恢复）。仍记档未改：
+feed/metrics 的 intervention_pending 死过滤（无害）；chatStream 120s 是总超时非空闲超时；
+usage/health 之外的成本价为参考值（中转/套餐内模型 cost_usd 记 null，不假装免费）。
 **0904 三批（发布日功能收口，测试 154/154 全绿）**：
 ① **origin=client 工具透传**——ChatBodySchema 收 OpenAI 标准 tools/tool_choice（消息对象 passthrough，
 tool_calls 活过校验层）；mergeClientTools 与注册表工具合流去重（撞名时客户端显式声明压过注册表）；
@@ -38,6 +39,15 @@ latencySeconds 直方图补段（crisis_prescan/twig_packet/assemble/gateway_fir
 优雅降级；nv 基于裁剪后文本保持键与内容一致）。④ **动态注册快照**：mcp-gateway write-through 落盘
 （MCP_STATE_PATH，compose 挂 gateway_data 卷），启动读回标记 known-unverified、首次调用懒重握手，
 失败进 lastError 尸检名单（/health 可见）。
+**0928 批次（全仓复审收口 + 衔枝同步，v1.1.0，测试 184/184 全绿（runtime 177 + gateway 7））**：
+**五个实锤 bug 清剿**：① deliver.ts 漏带 X-Broker-Token——TG 触达被自家 /internal/outbound/telegram 守卫 403、重试耗尽后 delivery_exhausted（补头 + 端到端投递测试）；② Fastify 无 trustProxy——反代后 req.ip 恒为代理 IP，`ip:` 限流退化成全体共享桶、登录尝试限流可锁死他人（TRUST_PROXY_HOPS 配置化，默认 1）；③ usage_logs.error 恒 false——失败请求从不落 usage 行，errors_total/error_rate 永远为 0（runModelLoop 外层补 error 行，幂等兜底）；④ mcp-gateway /register /call /tools 零鉴权 + 0.0.0.0 监听（BROKER_INTERNAL_TOKEN 配置即全端点要票，runtime 客户端同步带头）；⑤ Zeabur 版 litellm config.yaml 仍用不被 litellm 识别的 fallback_strategy（fallback 链从未生效）——移植 fallbacks，并新增 scripts/check-litellm-parity.mjs 双配置一致性 CI 门。
+**触达与传输**：TG 轮询并发化（per-chat 串行保序 + 全局 4 并发，记档「60s 工具回路堵消息」收口）；TG 429 按 retry_after 退避重试；去重键 TTL 120s→300s；**触达回应闭环**——deliver 带 dedupe_key → 内部落点反查 claim_id → TG 按 message_id 落回应映射（7 天 TTL）→ 用户回复触达消息即上报 `outcome='user_engaged'` 消费 remention 邀请（docs/upstream.md deferred 项落地）。
+**观测收口**：成本计价落地（MODEL_REGISTRY 挂参考价、finalize 计 cost_usd、mnemosyne_cost_usd 计数器激活）；/metrics 双层收敛（Caddy 403 + 可选 METRICS_TOKEN）；吞异常簇全部可见（twig packet 失败 / 候选扫描放弃 / 泳道分类降级 / huginn.yaml 损坏回默认 / 非法 cron / 触达生成全链落兜底——计数或一次性 error）；反刍指标补 scanned 总数、单轮耗时直方图、`outcome=queued` 语义修正；`npm run huginn -- --once reflect` 调试入口。
+**web**：settings 客户端册接真（/v1/web/clients 列表/签发/轮换/吊销，user_id 钉死，web 自吊销防护；is_active 从此有写入方）；console 加 Huginn 出站面板（summary + log，claim 脱敏为布尔）；forge 三卡接 /v1/web/mcp/health；observatory 水位卡接 24h 真实用量；版本牌经 Vite define 注入（v0.3.1 假牌退役）；api() 带超时；console 补 ΗΓΓΝ 出站记录。
+**mcp-gateway**：调用指标（/metrics，per server/tool calls/errors/latency）；allTools 并行聚合；callTool 显式超时 + TTL 配置化（MCP_TOOLS_TTL_MS / MCP_CALL_TIMEOUT_MS）；loadConfig 失败不再静默；优雅停机；skill_document 断头路收口（/tools 以 skill_documents 兄弟字段透出，runtime 注入工具描述，封顶 400 字符）；首次拥有测试（内置 E2E / 鉴权开关 / 注册校验 / fail-loud / 指标）。
+**运维**：compose 全栈 healthcheck + depends_on 条件启动 + 日志轮转 + 内存上限；monitoring profile 补齐 Grafana provisioning（datasource + 面板）与告警规则（down/错误率/链耗尽/反刍停滞）；备份链加固（时间戳到秒防覆盖、.tmp 原子改名、SHA256SUMS、pg_restore --list 冒烟、快照非空断言、失败 TG 通知、fetch 超时、防重入锁、日志自剪）；restore.md 修容器名硬编码 + 补 backup-local（custom 格式 pg_restore）恢复路线与演练记录表；生产环境 CONFIRM_SECRET/BROKER_INTERNAL_TOKEN 保留 insecure-dev 默认值即拒启；compose env 透传修正（SILICONFLOW_API_KEY 给 mnemosyne 的 TTS、mcp-gateway 补 SEMANTIC_SCHOLAR_API_KEY 等、删死 GOOGLE_TTS_API_KEY/QDRANT_URL）。
+**清剿**：删除 ProviderHealthMonitor / ttsCharsThisMonth 死代码，outbox 补报统一走 ingestion.reportIntervention（§3.6 单一入口名副其实），删 opusscript 依赖与 routes.ts 的 void 压制；.env.example 清死变量（JWT_SECRET/GOOGLE_CLIENT_ID/SMITHERY_API_KEY）补漏变量（ADMIN_TOKEN 等）；webLogin 轮换即恢复 is_active；recent 排序补 id tie-breaker；确认票 pending 键加 fnName 维度；listTools 单请求缓存（fallback 不重复拉网关）；env shadowing 改名。
+**衔枝同步**：上游 twig-memory 刷新至 @00c1aca（outcome/evidenceLevel、reflect async=1 均已推送，与宿主对齐无契约变化；host-loop 缓存策略收敛同宿主 R0–R4；CRISIS_LEXICON 未变，vendor 词表继续有效）。
 本文是维护者视角的
 诚实清单：哪些已可运行、哪些只留了接口位，以及各模块与设计文档章节的对应关系（§ 编号见
 `Mnemosyne_Technical_Implementation_Document_v0.3.0_complete.md` / `v0.3.1_patch.md`）。

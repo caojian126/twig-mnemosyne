@@ -2,6 +2,46 @@
 
 Mnemosyne 记忆女神的版本编年史。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [v1.1.0] — 2026-09-28
+
+全仓复审收口 + 衔枝同步。五个实锤 bug 清剿、触达回应闭环落地、观测面从「永远健康」修到诚实，测试 184/184（runtime 177 + mcp-gateway 7，单测口径；集成测试需真实 PG，本批未跑）。
+
+### Fixed · 实锤 bug 清剿
+
+- **TG 触达投递必 403**：deliver.ts 漏带 `X-Broker-Token`，Huginn 触达被自家 `/internal/outbound/telegram` 守卫拒绝、重试耗尽后 `delivery_exhausted`——补头 + 端到端投递测试
+- **限流语义失真**：Fastify 未设 trustProxy，反代后 `req.ip` 恒为代理 IP——`ip:` 240/min 退化成全体共享桶，登录尝试限流可被用来锁死他人；`TRUST_PROXY_HOPS` 配置化（默认 1）
+- **错误率观测全瞎**：`usage_logs.error` 恒 false（失败请求从不落 usage 行），errors_total / error_rate 永远为 0——失败路径补 error 记录，幂等兜底
+- **mcp-gateway 零鉴权**：`/register` `/call` `/tools` 无校验 + 监听 0.0.0.0——内网可污染工具面 / SSRF 跳板；配置 `BROKER_INTERNAL_TOKEN` 即全端点要票，runtime 客户端同步带票
+- **Zeabur 版 fallback 链从未生效**：`deploy/litellm/config.yaml` 用不被 litellm 识别的 `fallback_strategy`（compose 版已修、Zeabur 版漂移）；移植 `fallbacks` 并新增 `scripts/check-litellm-parity.mjs` 一致性 CI 门
+
+### Added
+
+- **触达回应闭环**（docs/upstream.md deferred 项）：deliver 带 dedupe_key → 内部落点反查 claim_id → TG 按 message_id 落回应映射 → 用户回复触达消息即上报 `outcome='user_engaged'` 消费 remention 邀请
+- **TG 轮询并发化**（记档项收口）：per-chat 串行保序 + 全局有界并发（`TG_MAX_CONCURRENCY`，默认 4）；429 按 retry_after 退避重试；去重键 TTL 120s→300s
+- **成本计价**：MODEL_REGISTRY 挂参考价（中转/套餐内不填则记 null，不假装免费），finalize 计 cost_usd，`mnemosyne_cost_usd` 计数器激活
+- **settings 客户端册接真**：`/v1/web/clients` 列表/签发/轮换/吊销（user_id 钉死、web 自吊销防护、is_active 从此有写入方）；console 加 Huginn 出站面板（近 7 天状态计数 + 触达记录，claim 脱敏）；forge 三卡接 `/v1/web/mcp/health`；observatory 水位卡接 24h 真实用量
+- **mcp-gateway 观测与加固**：per server/tool 调用指标（/metrics）；allTools 并行聚合；调用超时与 TTL 配置化；优雅停机；skill_document 透传收口（/tools 增 skill_documents，runtime 注入工具描述）；首次拥有测试套件
+- **CI**：runtime / mcp-gateway / web / litellm 双配置一致性 / compose 配置校验（.github/workflows/ci.yml）
+- **运维面**：compose 全栈 healthcheck + depends_on 条件启动 + 日志轮转 + 内存上限；Grafana provisioning（datasource + 面板）与四条告警规则；`/metrics` 双层收敛（Caddy 403 + 可选 METRICS_TOKEN）
+- **反刍可观测**：scanned 计数、单轮耗时直方图、`outcome=queued` 语义修正；`npm run huginn -- --once reflect` 调试入口
+- **备份链加固**：时间戳到秒防同日覆盖、原子改名、SHA256SUMS 清单、pg_restore --list 冒烟、快照非空断言、失败 TG 通知、fetch 超时、防重入锁
+
+### Fixed · 其他
+
+- 生产环境 CONFIRM_SECRET / BROKER_INTERNAL_TOKEN 保留 insecure-dev 默认值即拒启；TTS 键入 zod 统一校验
+- 吞异常簇全部可见：twig packet 失败 / 候选扫描放弃 / 泳道分类降级 / huginn.yaml 损坏回默认 / 非法 cron / 触达生成全链落兜底
+- restore.md：修容器名硬编码（compose exec）、补 backup-local（custom 格式 pg_restore）恢复路线与演练记录表
+- compose env 透传修正：SILICONFLOW_API_KEY 给 mnemosyne（TTS 兜底链）、mcp-gateway 补 SEMANTIC_SCHOLAR_API_KEY 等、删死 GOOGLE_TTS_API_KEY / QDRANT_URL 注入
+- 死代码清剿：ProviderHealthMonitor / ttsCharsThisMonth / opusscript / void 压制；outbox 补报统一走 `ingestion.reportIntervention`（§3.6 单一入口）
+- webLogin 轮换即恢复 is_active；recent 排序补 id tie-breaker；确认票 pending 键加 fnName 维度；listTools 单请求缓存；env shadowing 改名；.env.example 清死变量补漏变量
+- web：版本牌经 Vite define 注入（v0.3.1 假牌退役）、api() 带超时、observatory/forge 页脚诚实化
+
+### Upstream
+
+- 衔枝 twig-memory 刷新至 `00c1aca`：outcome/evidenceLevel 与 reflect async=1 已推送，与宿主对齐无契约变化；host-loop 缓存策略（叙事包挪本轮 user 消息头部）与宿主 R0–R4 口径一致；CRISIS_LEXICON 未变，vendor 词表继续有效
+
+---
+
 ## [v1.0.0] — 2026-09-04
 
 首个正式发布。单用户、自托管的 Personal AI Runtime：跨客户端、跨会话、跨模型的连续身份运行时。

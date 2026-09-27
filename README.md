@@ -2,7 +2,7 @@
 
 > 跨客户端、跨会话、跨模型的连续身份运行时。Your memory never dies.
 
-[![版本](https://img.shields.io/badge/version-v1.0.0-4a7fa5)](https://github.com/qimingjiu/twig-mnemosyne/releases) [![测试](https://img.shields.io/badge/tests-154%2F154-c9a227)](docs/testing.md) [![License: MIT](https://img.shields.io/badge/license-MIT-8a9a5b)](LICENSE)
+[![版本](https://img.shields.io/badge/version-v1.1.0-4a7fa5)](https://github.com/qimingjiu/twig-mnemosyne/releases) [![测试](https://img.shields.io/badge/tests-184%2F184-c9a227)](docs/testing.md) [![License: MIT](https://img.shields.io/badge/license-MIT-8a9a5b)](LICENSE)
 
 Mnemosyne 是一个单用户、自托管的 AI 陪伴运行时：Telegram bot、Web Dashboard，以及支持
 自定义 OpenAI 兼容 API 的聊天客户端，通过同一用户身份下的客户端凭证接入，
@@ -85,6 +85,11 @@ bootstrap 输出 `eternal_id` 与唯一的 `client_key`（明文只出现这一�
 compose 用到的挂载件（Caddyfile / litellm.yaml / init.sql / prometheus.yml）在
 [deploy/compose/](deploy/compose/)；MCP server 清单在
 [mcp-gateway/config.default.json](mcp-gateway/config.default.json)。
+
+另有两个**不入库的挂载目录**，新 clone 后需自行准备：
+- `./twig-memory/`——上游 muninn 最小副本（见上文「外部构建上下文」）；
+- `./skills/`——skill_document / MCP 相关文件目录，`.gitignore` 忽略。空着也可以启动
+  （Docker 会自动建空目录，仅 skill_document 引用它的 server 不可用），有则放入。
 
 ## 外部构建上下文
 
