@@ -4,10 +4,13 @@
  *   消解校验与连接之间的 DNS rebinding TOCTOU 窗口（2026-09-03 债务 #6 收口）；
  * - undici 自家 fetch + Agent 同源配对（全局 fetch 与 npm undici 版本可能不同）；
  * - Idempotency-Key = dedupeKey，重试不重复（T9.7）；
+ * - 内部出站落点（/internal/outbound/telegram 等）共享密钥经 X-Broker-Token 携带——
+ *   2026-09-28 修复：此前漏带该头，TG 触达被自家守卫 403、重试耗尽后 delivery_exhausted；
  * - 盲 webhook：响应体丢弃不读，超时 5s；
  * - muted 判定位于本单点（T9.4：无其他通道）。
  */
 import type { Db } from '../db.js'
+import { env } from '../config.js'
 import { Agent, fetch as undiciFetch } from 'undici'
 import { validateWebhookUrl, pinnedLookup, type WebhookGuardOptions } from '../identity/webhookGuard.js'
 
@@ -47,8 +50,10 @@ export async function deliverOutreach(
           'Content-Type': 'application/json',
           'Idempotency-Key': dedupeKey,
           'X-Huginn-Version': 'v0.3.1',
+          // 内部落点（TG 出站）的共享密钥守卫；配空串=守卫全开时不带头
+          ...(env.BROKER_INTERNAL_TOKEN.length > 0 ? { 'X-Broker-Token': env.BROKER_INTERNAL_TOKEN } : {}),
         },
-        body: JSON.stringify({ content, timestamp: Date.now() }),
+        body: JSON.stringify({ content, timestamp: Date.now(), dedupe_key: dedupeKey }),
         signal: AbortSignal.timeout(5000),
         dispatcher,
       })

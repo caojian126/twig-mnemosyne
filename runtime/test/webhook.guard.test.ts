@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { createServer, type Server } from 'node:http'
 import { isBlockedIp, validateWebhookUrl, pinnedLookup } from '../src/identity/webhookGuard.js'
 import { deliverOutreach } from '../src/outreach/deliver.js'
+import { env } from '../src/config.js'
 import type { Db } from '../src/db.js'
 
 describe('§2.5.1 Webhook 校验链（VULN-13 / T8.5 SSRF）', () => {
@@ -151,6 +152,31 @@ describe('§2.5.1 R6 钉扎：pinnedLookup + 钉扎 dispatcher 投递', () => {
       const result = await deliverOutreach(db, { allowInsecure: true, allowlist: ['127.0.0.1'] }, 'u1', 'hi', 'k3')
       expect(result.ok).toBe(false)
       expect(result.error).toContain('delivery_http_500')
+    } finally {
+      server.close()
+    }
+  })
+
+  it('E2E：内部落点共享密钥随投递携带（缺头被守卫 403——TG 触达 403 回归）', async () => {
+    let seen: Record<string, string | string[] | undefined> = {}
+    const server: Server = createServer((req, res) => {
+      seen = req.headers
+      // 与 /internal/outbound/telegram 同款守卫：空密钥或头不匹配一律 403
+      const t = req.headers['x-broker-token']
+      const token = env.BROKER_INTERNAL_TOKEN
+      if (token.length === 0 || typeof t !== 'string' || t !== token) {
+        res.statusCode = 403; res.end('forbidden'); return
+      }
+      res.statusCode = 200; res.end('ok')
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    try {
+      const db = { query: async () => ({ rows: [{ webhook_url: `http://127.0.0.1:${port}/hook` }] }) } as unknown as Db
+      const result = await deliverOutreach(db, { allowInsecure: true, allowlist: ['127.0.0.1'] }, 'u1', 'hi', 'k5')
+      expect(result.ok).toBe(true)
+      expect(seen['x-broker-token']).toBe(env.BROKER_INTERNAL_TOKEN)
+      expect(seen['idempotency-key']).toBe('k5')
     } finally {
       server.close()
     }
