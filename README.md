@@ -115,7 +115,7 @@ node_modules；目录在 `.gitignore` 中，不入库）。上游更新后重新
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。第三方组件致谢见 [NOTICE.md](NOTICE.md)。
+MIT，见 [LICENSE](LICENSE)。第三方组件致谢见 [NOTICE.md](NOTICE.md)。下游衍生作品的署名与机制归属约定（借鉴、改名、原创声明的规矩），见衔枝仓库的 [ATTRIBUTION.md](https://github.com/qimingjiu/twig-memory/blob/main/ATTRIBUTION.md)。
 
 ---
 
